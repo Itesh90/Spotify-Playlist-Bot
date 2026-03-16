@@ -1,0 +1,9 @@
+# .gitignore
+accounts.json
+tokens/
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+.agent/

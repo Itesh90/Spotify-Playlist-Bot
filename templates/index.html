@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Spotify Bot Dashboard</title>
+<meta name="description" content="Multi-account Spotify playlist automation dashboard" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  /* ─── Reset & Base ─────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #000000;
+    --surface:   rgba(18, 18, 18, 0.65);
+    --surface2:  rgba(30, 30, 30, 0.8);
+    --border:    rgba(255, 255, 255, 0.08);
+    --border-hover: rgba(255, 255, 255, 0.15);
+    --green:     #1ed760;
+    --green-dim: rgba(30, 215, 96, 0.15);
+    --green-glow: rgba(30, 215, 96, 0.4);
+    --red:       #ff4b4b;
+    --amber:     #fbbf24;
+    --muted:     #777;
+    --text:      #ffffff;
+    --text-dim:  #a7a7a7;
+    --font-mono: 'DM Mono', monospace;
+    --font-head: 'Syne', sans-serif;
+    --radius:    16px;
+    --radius-sm: 8px;
+  }
+
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-head);
+    min-height: 100vh;
+    overflow-x: hidden;
+    position: relative;
+  }
+
+  /* ─── Aurora Background Elements ─────────────────────────────────── */
+  body::before, body::after {
+    content: '';
+    position: fixed;
+    width: 60vw;
+    height: 60vh;
+    border-radius: 50%;
+    filter: blur(120px);
+    z-index: -1;
+    opacity: 0.15;
+    animation: float 20s infinite ease-in-out alternate;
+  }
+  body::before {
+    background: radial-gradient(circle, #1db954, transparent 70%);
+    top: -20vh;
+    left: -10vw;
+  }
+  body::after {
+    background: radial-gradient(circle, #1a2a1a, transparent 70%);
+    bottom: -20vh;
+    right: -10vw;
+    animation-delay: -10s;
+  }
+  
+  @keyframes float {
+    0% { transform: translate(0, 0) scale(1); }
+    100% { transform: translate(10vw, 5vh) scale(1.1); }
+  }
+
+  /* ─── Typography ─────────────────────────────────────────────────── */
+  h1, h2, h3, button, .label { font-family: var(--font-head); }
+  code, .mono { font-family: var(--font-mono); }
+
+  /* ─── Scrollbar ──────────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #333; border-radius: 99px; }
+
+  /* ─── Header ─────────────────────────────────────────────────────── */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    height: 72px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
+  .header-left { display: flex; align-items: center; gap: 1rem; }
+
+  .logo-ring {
+    width: 42px; height: 42px; border-radius: 50%;
+    background: var(--green);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 24px rgba(30, 215, 96, 0.5), inset 0 0 8px rgba(255,255,255,0.4);
+    position: relative;
+  }
+  .logo-ring::after {
+    content: ''; position: absolute; inset: -4px; border-radius: 50%;
+    border: 1px solid var(--green); opacity: 0.3;
+    animation: ripple 2.5s infinite linear;
+  }
+  @keyframes ripple {
+    0% { transform: scale(1); opacity: 0.5; }
+    100% { transform: scale(1.4); opacity: 0; }
+  }
+  .logo-ring svg { width: 24px; height: 24px; fill: #000; }
+
+  .header-titles h1 {
+    font-size: 1.2rem; font-weight: 800; letter-spacing: -.02em;
+    line-height: 1.1;
+    background: linear-gradient(to right, #ffffff, #a7a7a7);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .header-titles span {
+    font-family: var(--font-mono);
+    font-size: .7rem; color: var(--muted); letter-spacing: .08em;
+  }
+
+  .header-right { display: flex; gap: .75rem; align-items: center; }
+
+  /* ─── Buttons ─────────────────────────────────────────────────────── */
+  .btn {
+    font-family: var(--font-head); font-weight: 600; font-size: .85rem;
+    border: none; border-radius: var(--radius-sm); cursor: pointer;
+    padding: .6rem 1.2rem; transition: all .25s cubic-bezier(0.2, 0.8, 0.2, 1);
+    display: inline-flex; align-items: center; gap: .5rem;
+    letter-spacing: .02em; white-space: nowrap;
+  }
+  .btn:active { transform: scale(.95); }
+
+  .btn-green  { 
+    background: var(--green); color: #000; 
+    box-shadow: 0 4px 15px rgba(30,215,96,0.25);
+  }
+  .btn-green:hover  { 
+    background: #1fdf64; 
+    box-shadow: 0 6px 20px rgba(30,215,96,0.4), 0 0 0 1px rgba(255,255,255,0.2) inset; 
+    transform: translateY(-1px);
+  }
+
+  .btn-red    { background: rgba(255,75,75,.15); color: var(--red); border: 1px solid rgba(255,75,75,.3); }
+  .btn-red:hover    { background: rgba(255,75,75,.25); box-shadow: 0 4px 15px rgba(255,75,75,0.2); transform: translateY(-1px); }
+
+  .btn-ghost  { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
+  .btn-ghost:hover  { border-color: var(--border-hover); background: rgba(255,255,255,0.05); color: var(--text); }
+
+  .btn-start-all {
+    background: var(--green-dim); color: var(--green);
+    border: 1px solid rgba(29,185,84,.3);
+  }
+  .btn-start-all:hover { background: rgba(29,185,84,.2); }
+
+  /* ─── Stats Row ──────────────────────────────────────────────────── */
+  .stats-row {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 1rem; padding: 1.5rem 2rem; max-width: 1400px; margin: 0 auto;
+  }
+
+  .stat-card {
+    background: var(--surface); 
+    border: 1px solid var(--border);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: var(--radius); padding: 1.5rem;
+    position: relative; overflow: hidden;
+    transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.3s ease;
+  }
+  .stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    border-color: var(--border-hover);
+  }
+  .stat-card::before {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(135deg, rgba(255,255,255,.05), transparent);
+  }
+  .stat-label {
+    font-family: var(--font-mono); font-size: .7rem;
+    letter-spacing: .12em; color: var(--text-dim); text-transform: uppercase;
+    margin-bottom: .75rem; font-weight: 500;
+  }
+  .stat-value {
+    font-size: 2.5rem; font-weight: 800; line-height: 1;
+    font-family: var(--font-head);
+    position: relative;
+    z-index: 2;
+  }
+  .stat-value.white  { color: var(--text); text-shadow: 0 2px 10px rgba(255,255,255,0.2); }
+  .stat-value.green  { color: var(--green); text-shadow: 0 2px 15px var(--green-glow); }
+  .stat-value.amber  { color: var(--amber); text-shadow: 0 2px 15px rgba(245,158,11,0.3); }
+  .stat-value.red    { color: var(--red);   text-shadow: 0 2px 15px rgba(239,68,68,0.3); }
+
+  /* ─── Main Grid ──────────────────────────────────────────────────── */
+  main {
+    max-width: 1400px; margin: 0 auto;
+    padding: 0 2rem 4rem;
+  }
+
+  .section-title {
+    font-size: .7rem; font-family: var(--font-mono);
+    letter-spacing: .12em; color: var(--muted); text-transform: uppercase;
+    margin-bottom: 1rem;
+  }
+
+  #accounts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 1.25rem;
+  }
+
+  /* ─── Account Card ───────────────────────────────────────────────── */
+  .account-card {
+    background: var(--surface); 
+    border: 1px solid var(--border);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: var(--radius); overflow: hidden;
+    transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.3s, box-shadow 0.3s;
+    display: flex; flex-direction: column;
+  }
+  .account-card:hover {
+    border-color: rgba(255,255,255,0.12);
+    box-shadow: 0 12px 48px rgba(0,0,0,.6);
+    transform: translateY(-4px);
+  }
+  .account-card.is-playing {
+    border-color: rgba(30,215,96,.4);
+    box-shadow: 0 0 0 1px rgba(30,215,96,.2), 0 12px 48px rgba(0,0,0,.6), 0 0 30px rgba(30,215,96,0.1);
+  }
+  .account-card.is-error { border-color: rgba(255,75,75,.4); box-shadow: 0 0 24px rgba(255,75,75,.1); }
+
+  /* Top bar */
+  .card-top {
+    display: flex; align-items: center; gap: .85rem;
+    padding: 1rem 1.1rem .85rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .avatar {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: linear-gradient(135deg, #121212, #1db954);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-head); font-weight: 800; font-size: 1rem;
+    color: var(--text); flex-shrink: 0; text-transform: uppercase;
+    box-shadow: inset 0 2px 4px rgba(255,255,255,0.2), 0 4px 10px rgba(0,0,0,0.5);
+  }
+  .card-meta { flex: 1; min-width: 0; }
+  .card-name {
+    font-weight: 700; font-size: .9rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .card-sub {
+    font-family: var(--font-mono); font-size: .65rem; color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* Status badge */
+  .status-badge {
+    font-family: var(--font-mono); font-size: .62rem; font-weight: 500;
+    letter-spacing: .06em; text-transform: uppercase;
+    padding: .25rem .6rem; border-radius: 99px;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .badge-playing  { background: var(--green-dim); color: var(--green);  border: 1px solid rgba(29,185,84,.3); }
+  .badge-error    { background: rgba(229,57,53,.12); color: var(--red); border: 1px solid rgba(229,57,53,.3); }
+  .badge-starting { background: rgba(245,158,11,.1); color: var(--amber); border: 1px solid rgba(245,158,11,.3); }
+  .badge-default  { background: rgba(255,255,255,.05); color: var(--muted); border: 1px solid var(--border); }
+
+  /* Card body */
+  .card-body { padding: 1.25rem 1.1rem; display: flex; flex-direction: column; gap: 1rem; flex: 1; }
+
+  /* Now playing */
+  .now-playing {
+    display: flex; align-items: center; gap: .75rem;
+    background: rgba(30,215,96,0.08); border-radius: var(--radius-sm);
+    padding: .75rem 1rem;
+    border: 1px solid rgba(30,215,96,0.15);
+  }
+  .pulse-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green); flex-shrink: 0;
+    box-shadow: 0 0 12px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 16px var(--green); }
+    50%       { opacity: .5; transform: scale(.8); box-shadow: 0 0 4px var(--green); }
+  }
+  .now-playing-text {
+    font-family: var(--font-mono); font-size: .75rem; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex: 1; min-width: 0; font-weight: 500;
+  }
+
+  /* Progress bar */
+  .progress-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: .6rem;
+  }
+  .progress-label { font-family: var(--font-mono); font-size: .7rem; color: var(--text-dim); }
+  .progress-pct   { font-family: var(--font-mono); font-size: .7rem; color: var(--text); font-weight: 500; }
+  .progress-track {
+    height: 4px; background: rgba(255,255,255,0.08); border-radius: 99px; overflow: hidden;
+  }
+  .progress-fill  {
+    height: 100%; background: var(--green); border-radius: 99px;
+    box-shadow: 0 0 8px var(--green);
+    transition: width .8s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  /* Playlist list */
+  .playlist-list { display: flex; flex-direction: column; gap: 4px; }
+  .playlist-row {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .4rem .6rem; border-radius: var(--radius-sm);
+    transition: background .15s;
+  }
+  .playlist-row:hover { background: var(--surface2); }
+  .playlist-row.active { background: var(--green-dim); }
+
+  .pl-num {
+    font-family: var(--font-mono); font-size: .6rem; color: var(--muted);
+    min-width: 18px; text-align: right;
+  }
+  .pl-uri {
+    font-family: var(--font-mono); font-size: .68rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex: 1; min-width: 0; color: var(--text-dim);
+  }
+  .playlist-row.active .pl-uri { color: var(--green); }
+  .pl-remove {
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    font-size: .9rem; padding: 0 .2rem; line-height: 1;
+    transition: color .15s; flex-shrink: 0;
+  }
+  .pl-remove:hover { color: var(--red); }
+
+  /* Add playlist input */
+  .add-playlist-row {
+    display: flex; gap: .5rem; margin-top: auto;
+  }
+  .pl-input {
+    flex: 1; background: rgba(0,0,0,0.3); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: .75rem 1rem;
+    color: var(--text); font-family: var(--font-mono); font-size: .75rem;
+    outline: none; transition: border-color .2s, box-shadow .2s;
+  }
+  .pl-input::placeholder { color: var(--muted); }
+  .pl-input:focus { 
+    border-color: rgba(30,215,96,.5); 
+    background: rgba(30,215,96,.03);
+    box-shadow: 0 0 0 2px rgba(30,215,96,.15);
+  }
+
+  /* Log */
+  .activity-log {
+    background: rgba(0,0,0,0.5); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: .75rem 1rem;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .log-line {
+    font-family: var(--font-mono); font-size: .7rem; color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .log-line::before { content: '› '; color: var(--green); }
+
+  /* Action buttons */
+  .card-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
+  .card-actions .btn { flex: 1; justify-content: center; font-size: .8rem; padding: .65rem 1rem; }
+
+  /* ─── Empty state ─────────────────────────────────────────────────── */
+  .empty-state {
+    grid-column: 1 / -1; text-align: center;
+    padding: 6rem 2rem;
+    background: var(--surface);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px dashed rgba(255,255,255,0.15); border-radius: var(--radius);
+  }
+  .empty-state svg { width: 48px; height: 48px; fill: var(--muted); margin-bottom: 1rem; }
+  .empty-state h2 { font-size: 1.1rem; color: var(--text-dim); font-weight: 600; margin-bottom: .5rem; }
+  .empty-state p { font-family: var(--font-mono); font-size: .72rem; color: var(--muted); }
+
+  /* ─── Modal ──────────────────────────────────────────────────────── */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,.7); backdrop-filter: blur(4px);
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--surface); border: 1px solid #2a2a2a;
+    border-radius: var(--radius); width: 100%; max-width: 440px;
+    padding: 1.75rem; box-shadow: 0 24px 80px rgba(0,0,0,.6);
+    animation: modal-in .18s ease;
+  }
+  @keyframes modal-in {
+    from { opacity: 0; transform: scale(.95) translateY(8px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  .modal-title {
+    font-size: 1.1rem; font-weight: 700; margin-bottom: 1.5rem;
+    display: flex; align-items: center; gap: .6rem;
+  }
+  .modal-title::before {
+    content: ''; display: inline-block;
+    width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+  }
+
+  .form-field { margin-bottom: 1.1rem; }
+  .form-label {
+    display: block; font-family: var(--font-mono);
+    font-size: .7rem; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--text-dim); margin-bottom: .5rem; font-weight: 500;
+  }
+  .form-input {
+    width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: .8rem 1rem;
+    color: var(--text); font-family: var(--font-mono); font-size: .85rem;
+    outline: none; transition: all .2s;
+  }
+  .form-input:focus { border-color: rgba(30,215,96,.5); background: rgba(30,215,96,.03); box-shadow: 0 0 0 2px rgba(30,215,96,.15); }
+  .form-input::placeholder { color: var(--muted); }
+
+  .modal-actions {
+    display: flex; gap: .75rem; justify-content: flex-end; margin-top: 1.5rem;
+  }
+
+  /* ─── Toast ──────────────────────────────────────────────────────── */
+  #toast-container {
+    position: fixed; bottom: 1.5rem; right: 1.5rem;
+    z-index: 200; display: flex; flex-direction: column; gap: .6rem;
+  }
+  .toast {
+    font-family: var(--font-mono); font-size: .72rem;
+    padding: .7rem 1.1rem; border-radius: var(--radius-sm);
+    animation: toast-in .25s ease;
+    max-width: 320px;
+  }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateX(24px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .toast-success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(29,185,84,.3); }
+  .toast-error   { background: rgba(229,57,53,.12); color: var(--red);   border: 1px solid rgba(229,57,53,.3); }
+  .toast-info    { background: rgba(255,255,255,.06); color: var(--text-dim); border: 1px solid var(--border); }
+
+  /* ─── Responsive ──────────────────────────────────────────────────── */
+  @media (max-width: 700px) {
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    header, .stats-row, main { padding-left: 1rem; padding-right: 1rem; }
+    #accounts-grid { grid-template-columns: 1fr; }
+    .header-right .btn-start-all { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── Header ─────────────────────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <div class="logo-ring">
+      <!-- Spotify-style logo -->
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/>
+      </svg>
+    </div>
+    <div class="header-titles">
+      <h1>Spotify Bot Dashboard</h1>
+      <span>playlist automation · multi-account</span>
+    </div>
+  </div>
+  <div class="header-right">
+    <button class="btn btn-start-all" id="btn-start-all" onclick="startAll()">▶ Start All</button>
+    <button class="btn btn-green" onclick="openModal()">+ Add Account</button>
+  </div>
+</header>
+
+<!-- ─── Stats Row ──────────────────────────────────────────────────────── -->
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-label">Total Accounts</div>
+    <div class="stat-value white" id="stat-total">0</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Playing Now</div>
+    <div class="stat-value green" id="stat-playing">0</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Idle / Done</div>
+    <div class="stat-value amber" id="stat-idle">0</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Errors</div>
+    <div class="stat-value red" id="stat-errors">0</div>
+  </div>
+</div>
+
+<!-- ─── Accounts Grid ──────────────────────────────────────────────────── -->
+<main>
+  <div class="section-title" id="accounts-header">accounts</div>
+  <div id="accounts-grid"></div>
+</main>
+
+<!-- ─── Add Account Modal ─────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal" onclick="handleOverlayClick(event)">
+  <div class="modal">
+    <div class="modal-title">Add Account</div>
+
+    <div class="form-field">
+      <label class="form-label" for="modal-id">Account ID (nickname)</label>
+      <input class="form-input" type="text" id="modal-id" placeholder="client_1" autocomplete="off" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="modal-client-id">Spotify Client ID</label>
+      <input class="form-input" type="text" id="modal-client-id" placeholder="32-char hex string" autocomplete="off" />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="modal-client-secret">Spotify Client Secret</label>
+      <input class="form-input" type="password" id="modal-client-secret" placeholder="••••••••••••••••" />
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-green" onclick="addAccount()">Add Account</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Toast Container ───────────────────────────────────────────────── -->
+<div id="toast-container"></div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────
+let accountsData = [];
+
+// ─── Toast ────────────────────────────────────────────────────────────────
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+// ─── Modal ────────────────────────────────────────────────────────────────
+function openModal() {
+  document.getElementById('modal').classList.add('open');
+  document.getElementById('modal-id').focus();
+}
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  ['modal-id','modal-client-id','modal-client-secret'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+}
+function handleOverlayClick(e) {
+  if (e.target === document.getElementById('modal')) closeModal();
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+// ─── Stats ────────────────────────────────────────────────────────────────
+function updateStats(accounts) {
+  let playing = 0, idle = 0, errors = 0;
+  accounts.forEach(a => {
+    const s = a.status?.state ?? 'idle';
+    if (s === 'playing' || s === 'starting')  playing++;
+    else if (s === 'error')                    errors++;
+    else                                       idle++;
+  });
+  document.getElementById('stat-total').textContent   = accounts.length;
+  document.getElementById('stat-playing').textContent = playing;
+  document.getElementById('stat-idle').textContent    = idle;
+  document.getElementById('stat-errors').textContent  = errors;
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────
+function shortId(uri) {
+  // Strip "spotify:playlist:" prefix
+  return uri.replace('spotify:playlist:', '');
+}
+
+function initials(id) {
+  return id.slice(0, 2).toUpperCase();
+}
+
+function badgeClass(state) {
+  if (state === 'playing')  return 'badge-playing';
+  if (state === 'error')    return 'badge-error';
+  if (state === 'starting') return 'badge-starting';
+  return 'badge-default';
+}
+
+function renderCard(account) {
+  const { id, playlists = [], status = {} } = account;
+  const state      = status.state ?? 'idle';
+  const curIdx     = status.index ?? 0;
+  const curCtx     = status.current_playlist ?? '';
+  const log        = status.log ?? [];
+  const isRunning  = state === 'playing' || state === 'starting';
+  const pct        = playlists.length > 0
+    ? Math.round(((curIdx + (state === 'done' ? 1 : 0)) / playlists.length) * 100)
+    : 0;
+
+  const cardClass = ['account-card',
+    state === 'playing'  ? 'is-playing' : '',
+    state === 'error'    ? 'is-error'   : ''
+  ].join(' ').trim();
+
+  // Now playing bar
+  const nowPlayingHtml = state === 'playing' ? `
+    <div class="now-playing">
+      <div class="pulse-dot"></div>
+      <div class="now-playing-text mono" title="${curCtx}">${shortId(curCtx)}</div>
+    </div>` : '';
+
+  // Progress
+  const progressHtml = playlists.length > 0 ? `
+    <div class="progress-section">
+      <div class="progress-header">
+        <span class="progress-label">Playlist ${Math.min(curIdx + 1, playlists.length)} of ${playlists.length}</span>
+        <span class="progress-pct">${pct}%</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" style="width:${pct}%"></div>
+      </div>
+    </div>` : '';
+
+  // Playlist rows
+  const playlistRows = playlists.map((uri, i) => {
+    const isActive = (state === 'playing' || state === 'done') && i === curIdx;
+    return `
+      <div class="playlist-row ${isActive ? 'active' : ''}">
+        <span class="pl-num">${i + 1}</span>
+        <span class="pl-uri mono" title="${uri}">${shortId(uri)}</span>
+        <button class="pl-remove" onclick="removePlaylist('${id}', ${i})" title="Remove">×</button>
+      </div>`;
+  }).join('');
+
+  // Log (last 5 lines)
+  const logLines = log.slice(-5);
+  const logHtml = logLines.length > 0 ? `
+    <div class="activity-log">
+      ${logLines.map(l => `<div class="log-line">${l}</div>`).join('')}
+    </div>` : '';
+
+  // Action buttons
+  const actionHtml = isRunning
+    ? `<button class="btn btn-red" onclick="stopBot('${id}')">■ Stop</button>`
+    : `<button class="btn btn-green" onclick="startBot('${id}')">▶ Start</button>`;
+
+  return `
+  <div class="${cardClass}" id="card-${id}">
+    <div class="card-top">
+      <div class="avatar">${initials(id)}</div>
+      <div class="card-meta">
+        <div class="card-name">${id}</div>
+        <div class="card-sub">${playlists.length} playlist${playlists.length !== 1 ? 's' : ''}</div>
+      </div>
+      <span class="status-badge ${badgeClass(state)}">${state}</span>
+    </div>
+    <div class="card-body">
+      ${nowPlayingHtml}
+      ${progressHtml}
+      ${playlists.length > 0 ? `<div class="playlist-list">${playlistRows}</div>` : ''}
+      <div class="add-playlist-row">
+        <input class="pl-input" type="text" id="pl-input-${id}"
+          placeholder="spotify:playlist:URI"
+          onkeydown="if(event.key==='Enter') addPlaylist('${id}')" />
+        <button class="btn btn-ghost" onclick="addPlaylist('${id}')">Add</button>
+      </div>
+      ${logHtml}
+      <div class="card-actions">
+        ${actionHtml}
+        <button class="btn btn-ghost" onclick="deleteAccount('${id}')">Delete</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderGrid(accounts) {
+  const grid = document.getElementById('accounts-grid');
+  if (accounts.length === 0) {
+    grid.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0z"/>
+        </svg>
+        <h2>No accounts yet</h2>
+        <p>Click "+ Add Account" to get started</p>
+      </div>`;
+    return;
+  }
+  grid.innerHTML = accounts.map(renderCard).join('');
+}
+
+// ─── API Calls ────────────────────────────────────────────────────────────
+async function api(url, method = 'GET', body = null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  return res.json();
+}
+
+async function fetchAccounts() {
+  try {
+    const data = await api('/api/accounts');
+    accountsData = data;
+    renderGrid(data);
+    updateStats(data);
+  } catch (e) {
+    console.error('Failed to fetch accounts:', e);
+  }
+}
+
+async function startBot(id) {
+  const res = await api(`/api/bot/${id}/start`, 'POST');
+  if (res.error) { toast(res.error, 'error'); return; }
+  toast(`Bot started for ${id}`, 'success');
+  fetchAccounts();
+}
+
+async function stopBot(id) {
+  const res = await api(`/api/bot/${id}/stop`, 'POST');
+  if (res.error) { toast(res.error, 'error'); return; }
+  toast(`Bot stopped for ${id}`, 'info');
+  fetchAccounts();
+}
+
+async function startAll() {
+  const res = await api('/api/bot/start-all', 'POST');
+  if (res.started?.length)
+    toast(`Started: ${res.started.join(', ')}`, 'success');
+  if (res.errors?.length)
+    toast(res.errors.join(' | '), 'error');
+  if (!res.started?.length && !res.errors?.length)
+    toast('No idle accounts to start', 'info');
+  fetchAccounts();
+}
+
+async function addPlaylist(id) {
+  const input = document.getElementById(`pl-input-${id}`);
+  const uri = input.value.trim();
+  if (!uri) return;
+  if (!uri.startsWith('spotify:playlist:')) {
+    toast('URI must start with spotify:playlist:', 'error'); return;
+  }
+  const account = accountsData.find(a => a.id === id);
+  const playlists = [...(account?.playlists ?? []), uri];
+  const res = await api(`/api/accounts/${id}/playlists`, 'POST', { playlists });
+  if (res.error) { toast(res.error, 'error'); return; }
+  input.value = '';
+  toast('Playlist added', 'success');
+  fetchAccounts();
+}
+
+async function removePlaylist(id, idx) {
+  const account = accountsData.find(a => a.id === id);
+  const playlists = (account?.playlists ?? []).filter((_, i) => i !== idx);
+  const res = await api(`/api/accounts/${id}/playlists`, 'POST', { playlists });
+  if (res.error) { toast(res.error, 'error'); return; }
+  fetchAccounts();
+}
+
+async function addAccount() {
+  const id     = document.getElementById('modal-id').value.trim();
+  const cid    = document.getElementById('modal-client-id').value.trim();
+  const secret = document.getElementById('modal-client-secret').value.trim();
+
+  if (!id || !cid || !secret) {
+    toast('All fields are required', 'error'); return;
+  }
+  const res = await api('/api/accounts', 'POST', {
+    id, client_id: cid, client_secret: secret
+  });
+  if (res.error) { toast(res.error, 'error'); return; }
+  toast(`Account "${id}" added`, 'success');
+  closeModal();
+  fetchAccounts();
+}
+
+async function deleteAccount(id) {
+  if (!confirm(`Delete account "${id}"? This stops the bot and removes all config.`)) return;
+  const res = await api(`/api/accounts/${id}`, 'DELETE');
+  if (res.error) { toast(res.error, 'error'); return; }
+  toast(`Account "${id}" deleted`, 'info');
+  fetchAccounts();
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────
+setInterval(fetchAccounts, 5000);
+fetchAccounts();
+</script>
+</body>
+</html>
