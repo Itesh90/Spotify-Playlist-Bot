@@ -160,7 +160,38 @@ def bot_worker(account):
         ensure_playlist_followed(sp, current_context)
         set_state("playing", current_playlist=current_context, index=current_index)
         log(f"Started playlist {current_index + 1} of {len(playlists)}")
+
+        # Get total tracks in the current playlist so we can detect autoplay
+        try:
+            pl_id = current_context.split(":")[-1]
+            total_tracks = sp.playlist(pl_id, fields="tracks.total")["tracks"]["total"]
+        except Exception:
+            total_tracks = None
+        log(f"Playlist has {total_tracks} tracks" if total_tracks else "Could not fetch track count")
         time.sleep(3)  # Let Spotify register playback
+
+        def advance_to_next():
+            """Advance to the next playlist. Returns True if advanced, False if all done."""
+            nonlocal current_index, current_context, device_id, total_tracks, prev_playing
+            current_index += 1
+            if current_index >= len(playlists):
+                set_state("done")
+                log("All playlists finished.")
+                return False
+            device_id = get_active_device(sp, fallback_id=device_id)
+            sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
+            current_context = playlists[current_index]
+            ensure_playlist_followed(sp, current_context)
+            set_state("playing", current_playlist=current_context, index=current_index)
+            log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
+            # Fetch track count for the new playlist
+            try:
+                pl_id = current_context.split(":")[-1]
+                total_tracks = sp.playlist(pl_id, fields="tracks.total")["tracks"]["total"]
+            except Exception:
+                total_tracks = None
+            prev_playing = True
+            return True
 
         # ── Main polling loop ─────────────────────────────────────────────────
         prev_playing = True  # We just started playback above
@@ -182,11 +213,14 @@ def bot_worker(account):
                 context = current_context
                 progress = None
                 duration = None
+                track_number = None
             else:
                 is_playing = state.get("is_playing", False)
                 progress = state.get("progress_ms")
                 item = state.get("item")
                 duration = item.get("duration_ms") if item else None
+                # Get track number within the album/playlist (if available)
+                track_number = item.get("track_number") if item else None
                 ctx = state.get("context")
                 if ctx is None:
                     context = None
@@ -195,71 +229,56 @@ def bot_worker(account):
                 else:
                     context = str(ctx) if ctx else None
 
-            # Two ways to know the playlist ended:
-            # 1. Track is near the end and stopped (natural end or manual last-song play)
+            # ── Detection: has the playlist ended? ────────────────────────────
+            should_advance = False
+
+            # Signal 1: Playback stopped near end of track (natural end)
             near_end = (progress is not None and duration is not None
                         and duration > 0 and progress >= duration - 2000)
-            # 2. Spotify stopped entirely (state = None) after it was playing
-            #    This happens when the last song of a playlist finishes and nothing queues up
-            hard_stop = state_is_none and prev_playing
+            if not is_playing and context == current_context and near_end:
+                log("Playlist ended naturally (last track finished).")
+                should_advance = True
 
-            playlist_finished = (
-                not is_playing
-                and context == current_context
-                and (near_end or hard_stop)
-            )
+            # Signal 2: Spotify stopped entirely after it was playing
+            elif state_is_none and prev_playing:
+                log("Playback stopped completely.")
+                should_advance = True
 
-            if playlist_finished:
-                current_index += 1
-                if current_index >= len(playlists):
-                    set_state("done")
-                    log("All playlists finished.")
-                    break
+            # Signal 3: Context changed to None (autoplay playing contextless track)
+            elif context is None and is_playing and not state_is_none:
+                log("Autoplay detected (no playlist context) — overriding.")
+                should_advance = True
 
-                device_id = get_active_device(sp, fallback_id=device_id)
-                sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
-                current_context = playlists[current_index]
-                ensure_playlist_followed(sp, current_context)
-                set_state("playing", current_playlist=current_context, index=current_index)
-                log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
-                prev_playing = True
+            # Signal 4: Context changed to something NOT in our playlists
+            elif context is not None and context != current_context and context not in playlists:
+                log("Autoplay detected (different context) — overriding.")
+                should_advance = True
 
-            # Context changed — figure out why
-            elif context and context != current_context:
-                if context in playlists:
-                    # User manually switched to one of our configured playlists — sync index
-                    current_index = playlists.index(context)
-                    current_context = context
-                    with status_lock:
-                        bot_status[aid]["current_playlist"] = context
-                        bot_status[aid]["index"] = current_index
-                    log("Synced to another configured playlist.")
-                    prev_playing = is_playing
-                else:
-                    # Context changed to something OUTSIDE our playlists.
-                    # This is Spotify Autoplay/Radio kicking in after the playlist ended.
-                    # Override it and advance to the next configured playlist.
-                    log("Spotify autoplay detected — overriding with next playlist.")
-                    current_index += 1
-                    if current_index >= len(playlists):
-                        set_state("done")
-                        log("All playlists finished.")
-                        break
-                    device_id = get_active_device(sp, fallback_id=device_id)
-                    sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
-                    current_context = playlists[current_index]
-                    ensure_playlist_followed(sp, current_context)
-                    set_state("playing", current_playlist=current_context, index=current_index)
-                    log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
-                    prev_playing = True
+            # Signal 5: Context switched to another configured playlist (user action)
+            elif context is not None and context != current_context and context in playlists:
+                current_index = playlists.index(context)
+                current_context = context
+                with status_lock:
+                    bot_status[aid]["current_playlist"] = context
+                    bot_status[aid]["index"] = current_index
+                log("Synced to another configured playlist.")
+                # Fetch track count for this playlist
+                try:
+                    pl_id = current_context.split(":")[-1]
+                    total_tracks = sp.playlist(pl_id, fields="tracks.total")["tracks"]["total"]
+                except Exception:
+                    total_tracks = None
+                prev_playing = is_playing
 
             else:
-                # Normal poll: update prev_playing for next cycle
-                # If user paused, prev_playing stays True so we can detect resume accurately
+                # Normal poll — just track playing state
                 if is_playing:
                     prev_playing = True
-                # Don't set prev_playing=False on pause — we only want False when
-                # we explicitly know playback finished (handled above)
+
+            # ── Execute advancement ───────────────────────────────────────────
+            if should_advance:
+                if not advance_to_next():
+                    break  # All playlists done
 
     except spotipy.exceptions.SpotifyException as e:
         set_state("error")
