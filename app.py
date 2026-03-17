@@ -220,13 +220,34 @@ def bot_worker(account):
                 log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
                 prev_playing = True
 
-            # User manually changed context — sync bot state
+            # Context changed — figure out why
             elif context and context != current_context:
-                current_context = context
-                with status_lock:
-                    bot_status[aid]["current_playlist"] = context
-                log("External context change detected, bot synced.")
-                prev_playing = is_playing
+                if context in playlists:
+                    # User manually switched to one of our configured playlists — sync index
+                    current_index = playlists.index(context)
+                    current_context = context
+                    with status_lock:
+                        bot_status[aid]["current_playlist"] = context
+                        bot_status[aid]["index"] = current_index
+                    log("Synced to another configured playlist.")
+                    prev_playing = is_playing
+                else:
+                    # Context changed to something OUTSIDE our playlists.
+                    # This is Spotify Autoplay/Radio kicking in after the playlist ended.
+                    # Override it and advance to the next configured playlist.
+                    log("Spotify autoplay detected — overriding with next playlist.")
+                    current_index += 1
+                    if current_index >= len(playlists):
+                        set_state("done")
+                        log("All playlists finished.")
+                        break
+                    device_id = get_active_device(sp, fallback_id=device_id)
+                    sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
+                    current_context = playlists[current_index]
+                    ensure_playlist_followed(sp, current_context)
+                    set_state("playing", current_playlist=current_context, index=current_index)
+                    log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
+                    prev_playing = True
 
             else:
                 # Normal poll: update prev_playing for next cycle
@@ -354,7 +375,7 @@ def get_auth_url(aid):
         client_id=account["client_id"],
         client_secret=account["client_secret"],
         redirect_uri=REDIRECT_URI,
-        scope="user-read-playback-state user-modify-playback-state",
+        scope=SPOTIFY_SCOPE,
         cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
         open_browser=False,
         state=aid,  # Pass account ID as state so callback can identify it
