@@ -31,12 +31,20 @@ def save_accounts(accounts):
         json.dump(accounts, f, indent=2)
 
 
+SPOTIFY_SCOPE = (
+    "user-read-playback-state "
+    "user-modify-playback-state "
+    "playlist-modify-public "
+    "playlist-modify-private"
+)
+
+
 def get_sp(account):
     return spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=account["client_id"],
         client_secret=account["client_secret"],
         redirect_uri=REDIRECT_URI,
-        scope="user-read-playback-state user-modify-playback-state",
+        scope=SPOTIFY_SCOPE,
         cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
         open_browser=False,
     ))
@@ -62,6 +70,19 @@ def get_active_device(sp, fallback_id=None):
     except Exception:
         pass
     return fallback_id
+
+
+def ensure_playlist_followed(sp, playlist_uri):
+    """Follow the playlist if the user hasn't already saved it."""
+    try:
+        playlist_id = playlist_uri.split(":")[-1]  # Extract ID from URI
+        user_id = sp.current_user()["id"]
+        already_following = sp.playlist_is_following(playlist_id, [user_id])
+        if already_following and already_following[0]:
+            return  # Already saved, nothing to do
+        sp.current_user_follow_playlist(playlist_id)
+    except Exception:
+        pass  # Non-fatal — don't crash the bot over this
 
 
 # ─── Bot Worker ───────────────────────────────────────────────────────────────
@@ -132,6 +153,7 @@ def bot_worker(account):
         current_index = 0
         sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
         current_context = playlists[current_index]
+        ensure_playlist_followed(sp, current_context)
         set_state("playing", current_playlist=current_context, index=current_index)
         log(f"Started playlist {current_index + 1} of {len(playlists)}")
         time.sleep(3)  # Let Spotify register playback
@@ -180,6 +202,7 @@ def bot_worker(account):
                 device_id = get_active_device(sp, fallback_id=device_id)
                 sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
                 current_context = playlists[current_index]
+                ensure_playlist_followed(sp, current_context)
                 set_state("playing", current_playlist=current_context, index=current_index)
                 log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
 
@@ -231,7 +254,7 @@ def callback():
                 client_id=account["client_id"],
                 client_secret=account["client_secret"],
                 redirect_uri=REDIRECT_URI,
-                scope="user-read-playback-state user-modify-playback-state",
+                scope=SPOTIFY_SCOPE,
                 cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
                 open_browser=False,
             )
