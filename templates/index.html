@@ -656,6 +656,9 @@ function renderCard(account) {
     </div>` : '';
 
   // Action buttons
+  const authorizeBtn = !isRunning
+    ? `<button class="btn btn-ghost" onclick="authorizeAccount('${id}')" title="Connect Spotify account">🔑 Authorize</button>`
+    : '';
   const actionHtml = isRunning
     ? `<button class="btn btn-red" onclick="stopBot('${id}')">■ Stop</button>`
     : `<button class="btn btn-green" onclick="startBot('${id}')">▶ Start</button>`;
@@ -683,6 +686,7 @@ function renderCard(account) {
       ${logHtml}
       <div class="card-actions">
         ${actionHtml}
+        ${authorizeBtn}
         <button class="btn btn-ghost" onclick="deleteAccount('${id}')">Delete</button>
       </div>
     </div>
@@ -729,6 +733,14 @@ async function startBot(id) {
   if (res.error) { toast(res.error, 'error'); return; }
   toast(`Bot started for ${id}`, 'success');
   fetchAccounts();
+}
+
+async function authorizeAccount(id) {
+  toast('Fetching authorization URL...', 'info');
+  const res = await api(`/api/accounts/${id}/auth-url`);
+  if (res.error) { toast(res.error, 'error'); return; }
+  window.open(res.url, '_blank');
+  toast('Login in the new tab, then click Start', 'success');
 }
 
 async function stopBot(id) {

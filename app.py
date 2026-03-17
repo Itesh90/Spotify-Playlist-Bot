@@ -210,15 +210,22 @@ def callback():
     """Spotify OAuth callback — exchange the code for a token."""
     code = request.args.get("code")
     error = request.args.get("error")
+    state = request.args.get("state")  # account ID passed as state
+
     if error:
         return f"OAuth error: {error}", 400
     if not code:
         return "OAuth error: no code returned.", 400
 
-    # Exchange code for token using each configured account's auth manager
     accounts = load_accounts()
+
+    # Find the specific account by state (account ID)
+    target_accounts = [a for a in accounts if a["id"] == state] if state else accounts
+    if not target_accounts:
+        target_accounts = accounts  # fallback: try all
+
     exchanged = False
-    for account in accounts:
+    for account in target_accounts:
         try:
             auth_manager = SpotifyOAuth(
                 client_id=account["client_id"],
@@ -235,13 +242,13 @@ def callback():
             continue
 
     if not exchanged:
-        return "OAuth error: could not exchange code for any configured account.", 400
+        return "OAuth error: could not exchange code. Make sure you added the correct Client ID and Secret.", 400
 
     return """
     <html><body style="background:#0a0a0a;color:#1db954;font-family:monospace;
     display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
     <div style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:1rem">✓</div>
+        <div style="font-size:2rem;margin-bottom:1rem">&#10003;</div>
         <div>Spotify authentication successful.</div>
         <div style="color:#666;margin-top:.5rem;font-size:.85rem">
             You can close this tab and return to the dashboard.
@@ -288,6 +295,41 @@ def add_account():
     })
     save_accounts(accounts)
     return jsonify({"ok": True})
+
+
+@app.route("/api/accounts/<aid>/auth-url")
+def get_auth_url(aid):
+    """Generate the Spotify OAuth URL for a specific account."""
+    accounts = load_accounts()
+    account = next((a for a in accounts if a["id"] == aid), None)
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+    auth_manager = SpotifyOAuth(
+        client_id=account["client_id"],
+        client_secret=account["client_secret"],
+        redirect_uri=REDIRECT_URI,
+        scope="user-read-playback-state user-modify-playback-state",
+        cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
+        open_browser=False,
+        state=aid,  # Pass account ID as state so callback can identify it
+    )
+    url = auth_manager.get_authorize_url(state=aid)
+    return jsonify({"url": url})
+
+
+@app.route("/api/accounts/<aid>/token-status")
+def get_token_status(aid):
+    """Check if a cached token exists for the account."""
+    cache_path = f"{TOKENS_DIR}/.cache-{aid}"
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                token_info = json.load(f)
+            has_token = bool(token_info.get("access_token"))
+            return jsonify({"authorized": has_token})
+        except Exception:
+            pass
+    return jsonify({"authorized": False})
 
 
 @app.route("/api/accounts/<aid>", methods=["DELETE"])
