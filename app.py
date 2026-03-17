@@ -244,6 +244,18 @@ def bot_worker(account):
             progress = state.get("progress_ms")
             duration = item.get("duration_ms") if item else None
 
+            # ── Sync if user manually switched to another configured playlist ──
+            ctx = state.get("context")
+            state_context = ctx.get("uri") if isinstance(ctx, dict) else None
+            if state_context and state_context != current_context and state_context in playlists:
+                current_index = playlists.index(state_context)
+                current_context = state_context
+                playlist_track_uris = get_playlist_track_uris(sp, current_context)
+                set_state("playing", current_playlist=current_context, index=current_index)
+                log(f"Synced to playlist {current_index + 1} (user switched manually)")
+                prev_playing = is_playing
+                continue
+
             # ── Track-based autoplay detection (THE KEY FIX) ──────────────────
             if is_playing and current_track_uri and playlist_track_uris:
                 if current_track_uri not in playlist_track_uris:
@@ -414,7 +426,7 @@ def delete_account(aid):
     with status_lock:
         if aid in bot_status:
             bot_status[aid]["state"] = "stopped"
-        bot_status.pop(aid, None)
+    # Don't pop bot_status here — the thread needs it to exit cleanly
     return jsonify({"ok": True})
 
 
