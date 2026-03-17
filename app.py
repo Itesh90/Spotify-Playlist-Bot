@@ -127,9 +127,13 @@ def bot_worker(account):
     try:
         sp = get_sp(account)
 
-        # Validate token works (may trigger auth URL print)
+        # Validate token works
         try:
             sp.current_user()
+        except EOFError:
+            set_state("error")
+            log("Not authorized. Click \"🔑 Authorize\" first, then Start.")
+            return
         except spotipy.exceptions.SpotifyException as e:
             if "403" in str(e) or "PREMIUM_REQUIRED" in str(e):
                 set_state("error")
@@ -432,6 +436,12 @@ def start_bot(aid):
         return jsonify({"error": "Account not found"}), 404
     if not account.get("playlists"):
         return jsonify({"error": "No playlists configured"}), 400
+
+    # Check if token exists — user must Authorize first
+    cache_path = f"{TOKENS_DIR}/.cache-{aid}"
+    if not os.path.exists(cache_path):
+        return jsonify({"error": "Not authorized. Click 🔑 Authorize first."}), 400
+
     if aid in bot_threads and bot_threads[aid].is_alive():
         return jsonify({"error": "Bot already running"}), 400
     t = threading.Thread(target=bot_worker, args=(account,), daemon=True)
