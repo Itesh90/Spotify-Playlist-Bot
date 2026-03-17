@@ -90,7 +90,7 @@ def get_playlist_track_uris(sp, playlist_uri):
     """Fetch all track URIs from a playlist. Returns a set of URI strings."""
     try:
         pl_id = playlist_uri.split(":")[-1]
-        results = sp.playlist_tracks(pl_id, fields="items.track.uri,next", limit=100)
+        results = sp.playlist_tracks(pl_id, limit=100)
         uris = set()
         while results:
             for item in results.get("items", []):
@@ -102,7 +102,7 @@ def get_playlist_track_uris(sp, playlist_uri):
             else:
                 break
         return uris
-    except Exception:
+    except Exception as e:
         return set()
 
 
