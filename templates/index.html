@@ -713,8 +713,16 @@ function renderGrid(accounts) {
 async function api(url, method = 'GET', body = null) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  return res.json();
+  try {
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      try { return await res.json(); } catch (_) {}
+      return { error: `Server error (${res.status})` };
+    }
+    return await res.json();
+  } catch (e) {
+    return { error: `Network error: ${e.message}` };
+  }
 }
 
 async function fetchAccounts() {
@@ -765,8 +773,8 @@ async function addPlaylist(id) {
   const input = document.getElementById(`pl-input-${id}`);
   const uri = input.value.trim();
   if (!uri) return;
-  if (!uri.startsWith('spotify:playlist:')) {
-    toast('URI must start with spotify:playlist:', 'error'); return;
+  if (!uri.startsWith('spotify:playlist:') && !uri.startsWith('https://open.spotify.com/playlist/')) {
+    toast('Paste a Spotify playlist link or URI', 'error'); return;
   }
   const account = accountsData.find(a => a.id === id);
   const playlists = [...(account?.playlists ?? []), uri];
