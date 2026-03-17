@@ -35,7 +35,8 @@ SPOTIFY_SCOPE = (
     "user-read-playback-state "
     "user-modify-playback-state "
     "playlist-modify-public "
-    "playlist-modify-private"
+    "playlist-modify-private "
+    "playlist-read-private"
 )
 
 
@@ -83,6 +84,26 @@ def ensure_playlist_followed(sp, playlist_uri):
         sp.current_user_follow_playlist(playlist_id)
     except Exception:
         pass  # Non-fatal — don't crash the bot over this
+
+
+def get_playlist_track_uris(sp, playlist_uri):
+    """Fetch all track URIs from a playlist. Returns a set of URI strings."""
+    try:
+        pl_id = playlist_uri.split(":")[-1]
+        results = sp.playlist_tracks(pl_id, fields="items.track.uri,next", limit=100)
+        uris = set()
+        while results:
+            for item in results.get("items", []):
+                track = item.get("track")
+                if track and track.get("uri"):
+                    uris.add(track["uri"])
+            if results.get("next"):
+                results = sp.next(results)
+            else:
+                break
+        return uris
+    except Exception:
+        return set()
 
 
 # ─── Bot Worker ───────────────────────────────────────────────────────────────
@@ -161,18 +182,14 @@ def bot_worker(account):
         set_state("playing", current_playlist=current_context, index=current_index)
         log(f"Started playlist {current_index + 1} of {len(playlists)}")
 
-        # Get total tracks in the current playlist so we can detect autoplay
-        try:
-            pl_id = current_context.split(":")[-1]
-            total_tracks = sp.playlist(pl_id, fields="tracks.total")["tracks"]["total"]
-        except Exception:
-            total_tracks = None
-        log(f"Playlist has {total_tracks} tracks" if total_tracks else "Could not fetch track count")
+        # Fetch all track URIs for the current playlist
+        playlist_track_uris = get_playlist_track_uris(sp, current_context)
+        log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
         time.sleep(3)  # Let Spotify register playback
 
         def advance_to_next():
             """Advance to the next playlist. Returns True if advanced, False if all done."""
-            nonlocal current_index, current_context, device_id, total_tracks, prev_playing
+            nonlocal current_index, current_context, device_id, playlist_track_uris, prev_playing
             current_index += 1
             if current_index >= len(playlists):
                 set_state("done")
@@ -184,17 +201,15 @@ def bot_worker(account):
             ensure_playlist_followed(sp, current_context)
             set_state("playing", current_playlist=current_context, index=current_index)
             log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
-            # Fetch track count for the new playlist
-            try:
-                pl_id = current_context.split(":")[-1]
-                total_tracks = sp.playlist(pl_id, fields="tracks.total")["tracks"]["total"]
-            except Exception:
-                total_tracks = None
+            playlist_track_uris = get_playlist_track_uris(sp, current_context)
+            log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
             prev_playing = True
+            time.sleep(3)
             return True
 
         # ── Main polling loop ─────────────────────────────────────────────────
-        prev_playing = True  # We just started playback above
+        prev_playing = True
+        null_count = 0
         while not should_stop():
             time.sleep(POLL_INTERVAL)
 
@@ -207,78 +222,45 @@ def bot_worker(account):
                 log(f"Poll error: {e}")
                 continue
 
-            state_is_none = state is None
-            if state_is_none:
-                is_playing = False
-                context = current_context
-                progress = None
-                duration = None
-                track_number = None
-            else:
-                is_playing = state.get("is_playing", False)
-                progress = state.get("progress_ms")
-                item = state.get("item")
-                duration = item.get("duration_ms") if item else None
-                # Get track number within the album/playlist (if available)
-                track_number = item.get("track_number") if item else None
-                ctx = state.get("context")
-                if ctx is None:
-                    context = None
-                elif isinstance(ctx, dict):
-                    context = ctx.get("uri")
-                else:
-                    context = str(ctx) if ctx else None
+            # ── Parse playback state ──────────────────────────────────────────
+            if state is None:
+                null_count += 1
+                # Only advance after 3 consecutive nulls (15 sec) to avoid
+                # false triggers from brief network hiccups
+                if null_count >= 3 and prev_playing:
+                    log("Playback stopped completely — advancing.")
+                    null_count = 0
+                    if not advance_to_next():
+                        break
+                continue
 
-            # ── Detection: has the playlist ended? ────────────────────────────
-            should_advance = False
+            null_count = 0  # Reset on valid response
+            is_playing = state.get("is_playing", False)
+            item = state.get("item")
+            current_track_uri = item.get("uri") if item else None
+            progress = state.get("progress_ms")
+            duration = item.get("duration_ms") if item else None
 
-            # Signal 1: Playback stopped near end of track (natural end)
+            # ── Track-based autoplay detection (THE KEY FIX) ──────────────────
+            if is_playing and current_track_uri and playlist_track_uris:
+                if current_track_uri not in playlist_track_uris:
+                    # The playing track is NOT in our playlist = autoplay kicked in
+                    log(f"Autoplay detected! Track {current_track_uri} is not in playlist.")
+                    if not advance_to_next():
+                        break
+                    continue
+
+            # ── Fallback: natural end (paused near end of last track) ─────────
             near_end = (progress is not None and duration is not None
                         and duration > 0 and progress >= duration - 2000)
-            if not is_playing and context == current_context and near_end:
+            if not is_playing and near_end:
                 log("Playlist ended naturally (last track finished).")
-                should_advance = True
-
-            # Signal 2: Spotify stopped entirely after it was playing
-            elif state_is_none and prev_playing:
-                log("Playback stopped completely.")
-                should_advance = True
-
-            # Signal 3: Context changed to None (autoplay playing contextless track)
-            elif context is None and is_playing and not state_is_none:
-                log("Autoplay detected (no playlist context) — overriding.")
-                should_advance = True
-
-            # Signal 4: Context changed to something NOT in our playlists
-            elif context is not None and context != current_context and context not in playlists:
-                log("Autoplay detected (different context) — overriding.")
-                should_advance = True
-
-            # Signal 5: Context switched to another configured playlist (user action)
-            elif context is not None and context != current_context and context in playlists:
-                current_index = playlists.index(context)
-                current_context = context
-                with status_lock:
-                    bot_status[aid]["current_playlist"] = context
-                    bot_status[aid]["index"] = current_index
-                log("Synced to another configured playlist.")
-                # Fetch track count for this playlist
-                try:
-                    pl_id = current_context.split(":")[-1]
-                    total_tracks = sp.playlist(pl_id, fields="tracks.total")["tracks"]["total"]
-                except Exception:
-                    total_tracks = None
-                prev_playing = is_playing
-
-            else:
-                # Normal poll — just track playing state
-                if is_playing:
-                    prev_playing = True
-
-            # ── Execute advancement ───────────────────────────────────────────
-            if should_advance:
                 if not advance_to_next():
-                    break  # All playlists done
+                    break
+                continue
+
+            # ── Track playing state for next cycle ────────────────────────────
+            prev_playing = is_playing
 
     except spotipy.exceptions.SpotifyException as e:
         set_state("error")
@@ -497,6 +479,10 @@ def start_all_bots():
             continue  # Already running
         if not account.get("playlists"):
             errors.append(f"{aid}: no playlists")
+            continue
+        cache_path = f"{TOKENS_DIR}/.cache-{aid}"
+        if not os.path.exists(cache_path):
+            errors.append(f"{aid}: not authorized")
             continue
         if aid in bot_threads and bot_threads[aid].is_alive():
             continue
