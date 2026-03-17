@@ -184,7 +184,10 @@ def bot_worker(account):
 
         # Fetch all track URIs for the current playlist
         playlist_track_uris = get_playlist_track_uris(sp, current_context)
-        log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
+        if playlist_track_uris:
+            log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
+        else:
+            log("⚠️ Could not load track URIs — re-authorize to enable autoplay detection")
         time.sleep(3)  # Let Spotify register playback
 
         def advance_to_next():
