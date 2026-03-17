@@ -159,6 +159,7 @@ def bot_worker(account):
         time.sleep(3)  # Let Spotify register playback
 
         # ── Main polling loop ─────────────────────────────────────────────────
+        prev_playing = True  # We just started playback above
         while not should_stop():
             time.sleep(POLL_INTERVAL)
 
@@ -171,7 +172,8 @@ def bot_worker(account):
                 log(f"Poll error: {e}")
                 continue
 
-            if not state:
+            state_is_none = state is None
+            if state_is_none:
                 is_playing = False
                 context = current_context
                 progress = None
@@ -189,10 +191,21 @@ def bot_worker(account):
                 else:
                     context = str(ctx) if ctx else None
 
-            # Playlist ended: paused, context matches, and near end of last track
+            # Two ways to know the playlist ended:
+            # 1. Track is near the end and stopped (natural end or manual last-song play)
             near_end = (progress is not None and duration is not None
                         and duration > 0 and progress >= duration - 2000)
-            if not is_playing and context == current_context and near_end:
+            # 2. Spotify stopped entirely (state = None) after it was playing
+            #    This happens when the last song of a playlist finishes and nothing queues up
+            hard_stop = state_is_none and prev_playing
+
+            playlist_finished = (
+                not is_playing
+                and context == current_context
+                and (near_end or hard_stop)
+            )
+
+            if playlist_finished:
                 current_index += 1
                 if current_index >= len(playlists):
                     set_state("done")
@@ -205,6 +218,7 @@ def bot_worker(account):
                 ensure_playlist_followed(sp, current_context)
                 set_state("playing", current_playlist=current_context, index=current_index)
                 log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
+                prev_playing = True
 
             # User manually changed context — sync bot state
             elif context and context != current_context:
@@ -212,6 +226,15 @@ def bot_worker(account):
                 with status_lock:
                     bot_status[aid]["current_playlist"] = context
                 log("External context change detected, bot synced.")
+                prev_playing = is_playing
+
+            else:
+                # Normal poll: update prev_playing for next cycle
+                # If user paused, prev_playing stays True so we can detect resume accurately
+                if is_playing:
+                    prev_playing = True
+                # Don't set prev_playing=False on pause — we only want False when
+                # we explicitly know playback finished (handled above)
 
     except spotipy.exceptions.SpotifyException as e:
         set_state("error")
