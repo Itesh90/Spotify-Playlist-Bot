@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, redirect
+from flask import Flask, render_template, jsonify, request
 import json, os, threading, time
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -40,6 +40,15 @@ def get_sp(account):
         cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
         open_browser=False,
     ))
+
+
+def normalize_playlist_uri(raw):
+    """Convert Spotify share URLs to URIs, or return as-is if already a URI."""
+    raw = raw.strip()
+    if raw.startswith("https://open.spotify.com/playlist/"):
+        playlist_id = raw.split("/playlist/")[1].split("?")[0]
+        return f"spotify:playlist:{playlist_id}"
+    return raw
 
 
 def get_active_device(sp, fallback_id=None):
@@ -143,24 +152,25 @@ def bot_worker(account):
             if not state:
                 is_playing = False
                 context = current_context
+                progress = None
+                duration = None
             else:
                 is_playing = state.get("is_playing", False)
+                progress = state.get("progress_ms")
+                item = state.get("item")
+                duration = item.get("duration_ms") if item else None
                 ctx = state.get("context")
-                # DEBUG: Log context type and value for diagnosis
-                print(f"[DEBUG] Context type: {type(ctx)}, value: {ctx}")
                 if ctx is None:
                     context = None
                 elif isinstance(ctx, dict):
                     context = ctx.get("uri")
                 else:
-                    # Handle unexpected context type
-                    print(f"[DEBUG] Unexpected context type: {type(ctx)}")
                     context = str(ctx) if ctx else None
 
-            # Playlist ended (paused and context matches last known playlist)
-            if not is_playing and context == current_context:
-                # DEBUG: Log playlist end detection
-                print(f"[DEBUG] Playlist end detected: is_playing={is_playing}, context={context}, current_context={current_context}")
+            # Playlist ended: paused, context matches, and near end of last track
+            near_end = (progress is not None and duration is not None
+                        and duration > 0 and progress >= duration - 2000)
+            if not is_playing and context == current_context and near_end:
                 current_index += 1
                 if current_index >= len(playlists):
                     set_state("done")
@@ -197,10 +207,36 @@ def index():
 
 @app.route("/callback")
 def callback():
-    """Spotify OAuth callback — spotipy handles token exchange automatically."""
+    """Spotify OAuth callback — exchange the code for a token."""
     code = request.args.get("code")
+    error = request.args.get("error")
+    if error:
+        return f"OAuth error: {error}", 400
     if not code:
         return "OAuth error: no code returned.", 400
+
+    # Exchange code for token using each configured account's auth manager
+    accounts = load_accounts()
+    exchanged = False
+    for account in accounts:
+        try:
+            auth_manager = SpotifyOAuth(
+                client_id=account["client_id"],
+                client_secret=account["client_secret"],
+                redirect_uri=REDIRECT_URI,
+                scope="user-read-playback-state user-modify-playback-state",
+                cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
+                open_browser=False,
+            )
+            auth_manager.get_access_token(code, as_dict=False)
+            exchanged = True
+            break
+        except Exception:
+            continue
+
+    if not exchanged:
+        return "OAuth error: could not exchange code for any configured account.", 400
+
     return """
     <html><body style="background:#0a0a0a;color:#1db954;font-family:monospace;
     display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
@@ -259,6 +295,8 @@ def delete_account(aid):
     accounts = [a for a in load_accounts() if a["id"] != aid]
     save_accounts(accounts)
     with status_lock:
+        if aid in bot_status:
+            bot_status[aid]["state"] = "stopped"
         bot_status.pop(aid, None)
     return jsonify({"ok": True})
 
@@ -269,7 +307,7 @@ def update_playlists(aid):
     found = False
     for a in accounts:
         if a["id"] == aid:
-            a["playlists"] = request.json.get("playlists", [])
+            a["playlists"] = [normalize_playlist_uri(p) for p in request.json.get("playlists", [])]
             found = True
     if not found:
         return jsonify({"error": "Account not found"}), 404
