@@ -315,10 +315,27 @@ def bot_worker(account):
                         break
                     continue
 
-            # ── Track-based autoplay detection ────────────────────────────────
-            if is_playing and current_track_uri and playlist_track_uris:
-                if current_track_uri not in playlist_track_uris:
-                    log(f"Autoplay detected! Track {current_track_uri} is not in playlist.")
+            # ── Autoplay detection (3-layer, most → least specific) ───────────
+            if is_playing and current_track_uri:
+
+                # Layer 1 — context is None: Spotify autoplay plays a contextless
+                # track (always works, even if track URIs failed to load)
+                if state_context is None:
+                    log("Autoplay detected (no context) — advancing.")
+                    if not advance_to_next():
+                        break
+                    continue
+
+                # Layer 2 — context changed to a non-configured playlist
+                elif state_context != current_context and state_context not in playlists:
+                    log("Autoplay detected (different context) — advancing.")
+                    if not advance_to_next():
+                        break
+                    continue
+
+                # Layer 3 — track not in our loaded URI set (most precise)
+                elif playlist_track_uris and current_track_uri not in playlist_track_uris:
+                    log(f"Autoplay detected (unknown track) — advancing.")
                     if not advance_to_next():
                         break
                     continue
