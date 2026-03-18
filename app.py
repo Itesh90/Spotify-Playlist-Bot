@@ -192,8 +192,9 @@ def bot_worker(account):
         set_state("playing", current_playlist=current_context, index=current_index)
         log(f"Started playlist {current_index + 1} of {len(playlists)}")
 
-        # Fetch all track URIs for the current playlist
-        playlist_track_uris = get_playlist_track_uris(sp, current_context)
+        # Fetch all track URIs for the current playlist (ordered + set)
+        _ordered, playlist_track_uris = get_playlist_track_uris(sp, current_context)
+        playlist_last_uri = _ordered[-1] if _ordered else None
         if playlist_track_uris:
             log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
         else:
@@ -202,7 +203,8 @@ def bot_worker(account):
 
         def advance_to_next():
             """Advance to the next playlist. Returns True if advanced, False if all done."""
-            nonlocal current_index, current_context, device_id, playlist_track_uris, prev_playing
+            nonlocal current_index, current_context, device_id
+            nonlocal playlist_track_uris, playlist_last_uri, prev_playing, saw_last_track
             current_index += 1
             if current_index >= len(playlists):
                 set_state("done")
@@ -226,7 +228,9 @@ def bot_worker(account):
             ensure_playlist_followed(sp, current_context)
             set_state("playing", current_playlist=current_context, index=current_index)
             log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
-            playlist_track_uris = get_playlist_track_uris(sp, current_context)
+            _ordered, playlist_track_uris = get_playlist_track_uris(sp, current_context)
+            playlist_last_uri = _ordered[-1] if _ordered else None
+            saw_last_track = False
             log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
             # FIX (Bug 1, part of): Reset prev_playing to True here so the
             # null_count guard in the polling loop works correctly on the
@@ -244,6 +248,7 @@ def bot_worker(account):
         # state — allowing null_count to fire correctly.
         prev_playing = True
         null_count = 0
+        saw_last_track = False   # True once we see the final track playing
 
         while not should_stop():
             time.sleep(POLL_INTERVAL)
@@ -285,11 +290,30 @@ def bot_worker(account):
             if state_context and state_context != current_context and state_context in playlists:
                 current_index = playlists.index(state_context)
                 current_context = state_context
-                playlist_track_uris = get_playlist_track_uris(sp, current_context)
+                _ordered, playlist_track_uris = get_playlist_track_uris(sp, current_context)
+                playlist_last_uri = _ordered[-1] if _ordered else None
+                saw_last_track = False
                 set_state("playing", current_playlist=current_context, index=current_index)
                 log(f"Synced to playlist {current_index + 1} (user switched manually)")
                 prev_playing = is_playing
                 continue
+
+            # ── Last-track flag: mark when we’re on the playlist’s final song ──
+            if is_playing and current_track_uri and playlist_last_uri:
+                if current_track_uri == playlist_last_uri:
+                    saw_last_track = True
+
+            # ── Loop detection: last track was seen, now different track ────────
+            # Spotify looped the same playlist back to song 1 between polls:
+            # all tracks are still in playlist_track_uris so autoplay check
+            # would miss it. This flag catches it.
+            if saw_last_track and is_playing and current_track_uri:
+                if current_track_uri != playlist_last_uri:
+                    log("Playlist looped back — advancing to next playlist.")
+                    saw_last_track = False
+                    if not advance_to_next():
+                        break
+                    continue
 
             # ── Track-based autoplay detection ────────────────────────────────
             if is_playing and current_track_uri and playlist_track_uris:
