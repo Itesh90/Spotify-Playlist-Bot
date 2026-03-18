@@ -76,11 +76,11 @@ def get_active_device(sp, fallback_id=None):
 def ensure_playlist_followed(sp, playlist_uri):
     """Follow the playlist if the user hasn't already saved it."""
     try:
-        playlist_id = playlist_uri.split(":")[-1]  # Extract ID from URI
+        playlist_id = playlist_uri.split(":")[-1]
         user_id = sp.current_user()["id"]
         already_following = sp.playlist_is_following(playlist_id, [user_id])
         if already_following and already_following[0]:
-            return  # Already saved, nothing to do
+            return
         sp.current_user_follow_playlist(playlist_id)
     except Exception:
         pass  # Non-fatal — don't crash the bot over this
@@ -102,7 +102,7 @@ def get_playlist_track_uris(sp, playlist_uri):
             else:
                 break
         return uris
-    except Exception as e:
+    except Exception:
         return set()
 
 
@@ -110,7 +110,11 @@ def get_playlist_track_uris(sp, playlist_uri):
 
 def bot_worker(account):
     aid = account["id"]
-    playlists = account.get("playlists", [])
+    # FIX (Bug 3): Normalize all playlist URIs at worker start so that
+    # playlists saved via add_account (which skipped normalization) are
+    # also converted from share-URLs to spotify:playlist:... URIs before
+    # any sp.start_playback() call.
+    playlists = [normalize_playlist_uri(p) for p in account.get("playlists", [])]
 
     with status_lock:
         bot_status[aid] = {
@@ -148,19 +152,25 @@ def bot_worker(account):
     try:
         sp = get_sp(account)
 
-        # Validate token works
+        # FIX (Bug 5): Also catch SpotifyException HTTP 401 (invalid/expired
+        # token) so the friendly "Not authorized" message is shown instead of
+        # crashing the thread with a bare re-raise.
         try:
             sp.current_user()
-        except EOFError:
+        except (EOFError, spotipy.exceptions.SpotifyException) as e:
+            e_str = str(e)
+            if "401" in e_str or "403" in e_str or "PREMIUM_REQUIRED" in e_str:
+                if "PREMIUM_REQUIRED" in e_str or "403" in e_str:
+                    set_state("error")
+                    log("Spotify Premium is required to control playback.")
+                else:
+                    set_state("error")
+                    log("Not authorized. Click \"🔑 Authorize\" first, then Start.")
+                return
+            # Any other SpotifyException or EOFError → not authorized
             set_state("error")
             log("Not authorized. Click \"🔑 Authorize\" first, then Start.")
             return
-        except spotipy.exceptions.SpotifyException as e:
-            if "403" in str(e) or "PREMIUM_REQUIRED" in str(e):
-                set_state("error")
-                log("Spotify Premium is required to control playback.")
-                return
-            raise
 
         device_id = get_active_device(sp)
         if not device_id:
@@ -198,21 +208,43 @@ def bot_worker(account):
                 set_state("done")
                 log("All playlists finished.")
                 return False
-            device_id = get_active_device(sp, fallback_id=device_id)
-            sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
+            # FIX (Bug 4): Wrap start_playback in try/except so a transient
+            # API error (device offline, token hiccup) logs a clear message
+            # and returns False gracefully instead of crashing the thread.
+            try:
+                device_id = get_active_device(sp, fallback_id=device_id)
+                sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
+            except spotipy.exceptions.SpotifyException as e:
+                log(f"Failed to start playlist {current_index + 1}: {e}")
+                set_state("error")
+                return False
+            except Exception as e:
+                log(f"Unexpected error starting playlist {current_index + 1}: {e}")
+                set_state("error")
+                return False
             current_context = playlists[current_index]
             ensure_playlist_followed(sp, current_context)
             set_state("playing", current_playlist=current_context, index=current_index)
             log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
             playlist_track_uris = get_playlist_track_uris(sp, current_context)
             log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
+            # FIX (Bug 1, part of): Reset prev_playing to True here so the
+            # null_count guard in the polling loop works correctly on the
+            # newly started playlist.
             prev_playing = True
             time.sleep(3)
             return True
 
         # ── Main polling loop ─────────────────────────────────────────────────
+
+        # FIX (Bug 1): Track whether we were ever truly playing (not just
+        # "not paused"). prev_playing is now ONLY set to False when Spotify
+        # explicitly tells us is_playing=False AND progress is not near end,
+        # so it stays True across the paused-end state that precedes a None
+        # state — allowing null_count to fire correctly.
         prev_playing = True
         null_count = 0
+
         while not should_stop():
             time.sleep(POLL_INTERVAL)
 
@@ -229,7 +261,10 @@ def bot_worker(account):
             if state is None:
                 null_count += 1
                 # Only advance after 3 consecutive nulls (15 sec) to avoid
-                # false triggers from brief network hiccups
+                # false triggers from brief network hiccups.
+                # FIX (Bug 1): prev_playing is no longer clobbered by the
+                # paused-but-not-near-end branch below, so this guard fires
+                # correctly when Spotify goes silent after a playlist ends.
                 if null_count >= 3 and prev_playing:
                     log("Playback stopped completely — advancing.")
                     null_count = 0
@@ -256,26 +291,45 @@ def bot_worker(account):
                 prev_playing = is_playing
                 continue
 
-            # ── Track-based autoplay detection (THE KEY FIX) ──────────────────
+            # ── Track-based autoplay detection ────────────────────────────────
             if is_playing and current_track_uri and playlist_track_uris:
                 if current_track_uri not in playlist_track_uris:
-                    # The playing track is NOT in our playlist = autoplay kicked in
                     log(f"Autoplay detected! Track {current_track_uri} is not in playlist.")
                     if not advance_to_next():
                         break
                     continue
 
             # ── Fallback: natural end (paused near end of last track) ─────────
-            near_end = (progress is not None and duration is not None
-                        and duration > 0 and progress >= duration - 2000)
-            if not is_playing and near_end:
+            # FIX (Bug 2): Spotify resets progress_ms to 0 when a playlist
+            # ends, so `progress >= duration - 2000` would be False (0 >= ~208000).
+            # We now also treat progress == 0 with is_playing=False as a valid
+            # end signal, since a track would never legitimately sit at exactly
+            # 0 ms paused unless Spotify just reset it after finishing.
+            near_end = (
+                not is_playing
+                and duration is not None
+                and duration > 0
+                and (
+                    (progress is not None and progress >= duration - 2000)
+                    or progress == 0  # Spotify reset after playlist finished
+                )
+            )
+            if near_end:
                 log("Playlist ended naturally (last track finished).")
                 if not advance_to_next():
                     break
                 continue
 
             # ── Track playing state for next cycle ────────────────────────────
-            prev_playing = is_playing
+            # FIX (Bug 1): Only set prev_playing = False when the player is
+            # genuinely idle mid-playlist (user paused, etc.), NOT when we've
+            # already handled a near_end above. This prevents prev_playing from
+            # going False one poll before state→None, which broke null_count.
+            if is_playing:
+                prev_playing = True
+            # Intentionally do NOT set prev_playing = False here for !is_playing;
+            # the null_count path needs prev_playing to remain True so it can
+            # fire after Spotify returns None following a playlist end.
 
     except spotipy.exceptions.SpotifyException as e:
         set_state("error")
@@ -374,11 +428,13 @@ def add_account():
     accounts = load_accounts()
     if any(a["id"] == data["id"] for a in accounts):
         return jsonify({"error": "Account ID already exists"}), 409
+    # FIX (Bug 3): Normalize playlist URIs on account creation, just like
+    # update_playlists does — so share URLs are converted immediately.
     accounts.append({
         "id": data["id"],
         "client_id": data["client_id"],
         "client_secret": data["client_secret"],
-        "playlists": data.get("playlists", []),
+        "playlists": [normalize_playlist_uri(p) for p in data.get("playlists", [])],
     })
     save_accounts(accounts)
     return jsonify({"ok": True})
