@@ -9,6 +9,7 @@ ACCOUNTS_FILE = "accounts.json"
 TOKENS_DIR = "tokens"
 REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://localhost:5000/callback")
 POLL_INTERVAL = 5  # seconds
+DEBUG = False  # set True only when troubleshooting poll-cycle logs
 
 os.makedirs(TOKENS_DIR, exist_ok=True)
 
@@ -87,23 +88,25 @@ def ensure_playlist_followed(sp, playlist_uri):
 
 
 def get_playlist_track_uris(sp, playlist_uri):
-    """Fetch all track URIs from a playlist. Returns a set of URI strings."""
+    """Fetch all track URIs from a playlist. Returns (ordered_list, uri_set)."""
     try:
         pl_id = playlist_uri.split(":")[-1]
         results = sp.playlist_tracks(pl_id, limit=100)
+        ordered = []  # keeps track order
         uris = set()
         while results:
             for item in results.get("items", []):
                 track = item.get("track")
                 if track and track.get("uri"):
+                    ordered.append(track["uri"])
                     uris.add(track["uri"])
             if results.get("next"):
                 results = sp.next(results)
             else:
                 break
-        return uris
+        return ordered, uris  # return BOTH
     except Exception:
-        return set()
+        return [], set()
 
 
 # ─── Bot Worker ───────────────────────────────────────────────────────────────
@@ -204,7 +207,7 @@ def bot_worker(account):
         def advance_to_next():
             """Advance to the next playlist. Returns True if advanced, False if all done."""
             nonlocal current_index, current_context, device_id
-            nonlocal playlist_track_uris, playlist_last_uri, prev_playing, saw_last_track
+            nonlocal playlist_track_uris, playlist_last_uri, prev_playing, saw_last_track,play_started_at
             current_index += 1
             if current_index >= len(playlists):
                 set_state("done")
@@ -236,6 +239,7 @@ def bot_worker(account):
             # null_count guard in the polling loop works correctly on the
             # newly started playlist.
             prev_playing = True
+            play_started_at = time.time()
             time.sleep(3)
             return True
 
@@ -249,6 +253,7 @@ def bot_worker(account):
         prev_playing = True
         null_count = 0
         saw_last_track = False   # True once we see the final track playing
+        play_started_at = time.time()
 
         while not should_stop():
             time.sleep(POLL_INTERVAL)
@@ -265,28 +270,31 @@ def bot_worker(account):
             # ── Parse playback state ──────────────────────────────────────────
             if state is None:
                 null_count += 1
-                # Only advance after 3 consecutive nulls (15 sec) to avoid
-                # false triggers from brief network hiccups.
-                # FIX (Bug 1): prev_playing is no longer clobbered by the
-                # paused-but-not-near-end branch below, so this guard fires
-                # correctly when Spotify goes silent after a playlist ends.
-                if null_count >= 3 and prev_playing:
+                if null_count >= 3 and prev_playing and (time.time() - play_started_at > 30):
                     log("Playback stopped completely — advancing.")
                     null_count = 0
                     if not advance_to_next():
                         break
                 continue
 
-            null_count = 0  # Reset on valid response
+            null_count = 0
             is_playing = state.get("is_playing", False)
             item = state.get("item")
             current_track_uri = item.get("uri") if item else None
             progress = state.get("progress_ms")
             duration = item.get("duration_ms") if item else None
-
-            # ── Sync if user manually switched to another configured playlist ──
             ctx = state.get("context")
             state_context = ctx.get("uri") if isinstance(ctx, dict) else None
+
+            # ── Debug log every poll (gated behind DEBUG flag) ────────────────
+            if DEBUG:
+                track_name = item.get("name", "?") if item else "None"
+                log(f"[DBG] playing={is_playing} track='{track_name}' "
+                    f"ctx_match={state_context == current_context} "
+                    f"in_set={current_track_uri in playlist_track_uris if current_track_uri else '?'} "
+                    f"saw_last={saw_last_track}")
+
+            # ── Sync if user manually switched to another configured playlist ─
             if state_context and state_context != current_context and state_context in playlists:
                 current_index = playlists.index(state_context)
                 current_context = state_context
@@ -298,62 +306,52 @@ def bot_worker(account):
                 prev_playing = is_playing
                 continue
 
-            # ── Last-track flag: mark when we’re on the playlist’s final song ──
+            # ── Last-track flag ───────────────────────────────────────────────
             if is_playing and current_track_uri and playlist_last_uri:
                 if current_track_uri == playlist_last_uri:
                     saw_last_track = True
 
-            # ── Loop detection: last track was seen, now different track ────────
-            # Spotify looped the same playlist back to song 1 between polls:
-            # all tracks are still in playlist_track_uris so autoplay check
-            # would miss it. This flag catches it.
+            # ── Loop detection (playlist restarted from song 1) ───────────────
             if saw_last_track and is_playing and current_track_uri:
                 if current_track_uri != playlist_last_uri:
-                    log("Playlist looped back — advancing to next playlist.")
+                    log("Playlist looped/ended — advancing to next playlist.")
                     saw_last_track = False
                     if not advance_to_next():
                         break
                     continue
 
-            # ── Autoplay detection (3-layer, most → least specific) ───────────
+            # ── Autoplay detection (3-layer) ──────────────────────────────────
             if is_playing and current_track_uri:
 
-                # Layer 1 — context is None: Spotify autoplay plays a contextless
-                # track (always works, even if track URIs failed to load)
+                # Layer 1: context gone (contextless autoplay)
                 if state_context is None:
                     log("Autoplay detected (no context) — advancing.")
                     if not advance_to_next():
                         break
                     continue
 
-                # Layer 2 — context changed to a non-configured playlist
-                elif state_context != current_context and state_context not in playlists:
+                # Layer 2: context changed to unknown playlist
+                if state_context != current_context and state_context not in playlists:
                     log("Autoplay detected (different context) — advancing.")
                     if not advance_to_next():
                         break
                     continue
 
-                # Layer 3 — track not in our loaded URI set (most precise)
-                elif playlist_track_uris and current_track_uri not in playlist_track_uris:
-                    log(f"Autoplay detected (unknown track) — advancing.")
+                # Layer 3: track not in our playlist's URI set
+                if playlist_track_uris and current_track_uri not in playlist_track_uris:
+                    log("Autoplay detected (unknown track) — advancing.")
                     if not advance_to_next():
                         break
                     continue
 
             # ── Fallback: natural end (paused near end of last track) ─────────
-            # FIX (Bug 2): Spotify resets progress_ms to 0 when a playlist
-            # ends, so `progress >= duration - 2000` would be False (0 >= ~208000).
-            # We now also treat progress == 0 with is_playing=False as a valid
-            # end signal, since a track would never legitimately sit at exactly
-            # 0 ms paused unless Spotify just reset it after finishing.
             near_end = (
                 not is_playing
+                and saw_last_track
                 and duration is not None
                 and duration > 0
-                and (
-                    (progress is not None and progress >= duration - 2000)
-                    or progress == 0  # Spotify reset after playlist finished
-                )
+                and progress is not None
+                and progress >= duration - 2000
             )
             if near_end:
                 log("Playlist ended naturally (last track finished).")
@@ -362,15 +360,11 @@ def bot_worker(account):
                 continue
 
             # ── Track playing state for next cycle ────────────────────────────
-            # FIX (Bug 1): Only set prev_playing = False when the player is
-            # genuinely idle mid-playlist (user paused, etc.), NOT when we've
-            # already handled a near_end above. This prevents prev_playing from
-            # going False one poll before state→None, which broke null_count.
             if is_playing:
                 prev_playing = True
-            # Intentionally do NOT set prev_playing = False here for !is_playing;
-            # the null_count path needs prev_playing to remain True so it can
-            # fire after Spotify returns None following a playlist end.
+            else:
+                prev_playing = False
+
 
     except spotipy.exceptions.SpotifyException as e:
         set_state("error")
