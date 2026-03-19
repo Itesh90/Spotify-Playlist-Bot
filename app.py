@@ -169,81 +169,57 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     if account_id:
         add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
 
-    # Try playlist_tracks with market and additional_types
+    def _extract_uri(item_obj):
+        """Extract track URI - Spotify uses 'track' or 'item' key depending on API version."""
+        track = item_obj.get("track") or item_obj.get("item")
+        if track and isinstance(track, dict) and track.get("uri"):
+            return track["uri"]
+        return None
+
+    # Primary: sp.playlist_tracks()
     try:
-        results = sp.playlist_tracks(
-            playlist_id,
-            market="from_token",
-            additional_types=("track", "episode")
-        )
+        results = sp.playlist_tracks(playlist_id, market="from_token")
     except Exception as e:
         if account_id:
             add_log(account_id, f"playlist_tracks() error: {e}")
-        # Fallback: try sp.playlist() to get tracks
-        try:
-            if account_id:
-                add_log(account_id, "Trying fallback sp.playlist()...")
-            pl_data = sp.playlist(playlist_id, market="from_token")
-            for item in pl_data.get("tracks", {}).get("items", []):
-                track = item.get("track")
-                if track and track.get("uri"):
-                    tracks.append(track["uri"])
-            if account_id:
-                add_log(account_id, f"Fallback found {len(tracks)} tracks")
-            return tracks
-        except Exception as e2:
-            if account_id:
-                add_log(account_id, f"Fallback also failed: {e2}")
-            return tracks
+        results = None
 
-    page = 1
-    while results:
-        items = results.get("items", [])
-        null_count = 0
+    if results:
+        page = 1
+        while results:
+            items = results.get("items", [])
+            for item in items:
+                uri = _extract_uri(item)
+                if uri:
+                    tracks.append(uri)
 
-        for item in items:
-            track = item.get("track")
-            if track and track.get("uri"):
-                tracks.append(track["uri"])
+            if account_id:
+                add_log(account_id, f"Page {page}: {len(items)} items, {len(tracks)} tracks so far")
+
+            if results.get("next"):
+                try:
+                    results = sp.next(results)
+                    page += 1
+                except Exception:
+                    break
             else:
-                null_count += 1
-                # Log raw keys for debugging
-                if account_id and null_count <= 3:
-                    item_keys = list(item.keys())
-                    has_episode = "episode" in item_keys
-                    track_val = item.get("track")
-                    add_log(account_id, f"Null item keys={item_keys}, episode={has_episode}, track_type={type(track_val).__name__}")
-
-        if account_id:
-            add_log(account_id, f"Page {page}: {len(items)} items, {null_count} null, {len(tracks)} valid")
-
-        if results.get("next"):
-            try:
-                results = sp.next(results)
-                page += 1
-            except Exception as e:
-                if account_id:
-                    add_log(account_id, f"Pagination error: {e}")
                 break
-        else:
-            break
 
-    # If still no tracks, try sp.playlist() as last resort
+    # Fallback: sp.playlist() if no tracks found
     if not tracks:
         try:
             if account_id:
-                add_log(account_id, "No tracks from playlist_tracks, trying sp.playlist()...")
+                add_log(account_id, "Trying sp.playlist() fallback...")
             pl_data = sp.playlist(playlist_id, market="from_token")
-            total = pl_data.get("tracks", {}).get("total", 0)
-            if account_id:
-                add_log(account_id, f"sp.playlist() reports {total} total tracks")
             for item in pl_data.get("tracks", {}).get("items", []):
-                track = item.get("track")
-                if track and track.get("uri"):
-                    tracks.append(track["uri"])
+                uri = _extract_uri(item)
+                if uri:
+                    tracks.append(uri)
+            if account_id:
+                add_log(account_id, f"Fallback found {len(tracks)} tracks")
         except Exception as e:
             if account_id:
-                add_log(account_id, f"sp.playlist() fallback error: {e}")
+                add_log(account_id, f"Fallback error: {e}")
 
     if account_id:
         add_log(account_id, f"Total tracks found: {len(tracks)}")
