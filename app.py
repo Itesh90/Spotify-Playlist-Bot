@@ -169,25 +169,53 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     if account_id:
         add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
 
+    # Try playlist_tracks with market and additional_types
     try:
-        results = sp.playlist_tracks(playlist_id, market="from_token")
+        results = sp.playlist_tracks(
+            playlist_id,
+            market="from_token",
+            additional_types=("track", "episode")
+        )
     except Exception as e:
         if account_id:
             add_log(account_id, f"playlist_tracks() error: {e}")
-        return tracks
+        # Fallback: try sp.playlist() to get tracks
+        try:
+            if account_id:
+                add_log(account_id, "Trying fallback sp.playlist()...")
+            pl_data = sp.playlist(playlist_id, market="from_token")
+            for item in pl_data.get("tracks", {}).get("items", []):
+                track = item.get("track")
+                if track and track.get("uri"):
+                    tracks.append(track["uri"])
+            if account_id:
+                add_log(account_id, f"Fallback found {len(tracks)} tracks")
+            return tracks
+        except Exception as e2:
+            if account_id:
+                add_log(account_id, f"Fallback also failed: {e2}")
+            return tracks
 
     page = 1
     while results:
         items = results.get("items", [])
-        null_tracks = sum(1 for i in items if not i.get("track"))
-
-        if account_id:
-            add_log(account_id, f"Page {page}: {len(items)} items, {null_tracks} null tracks")
+        null_count = 0
 
         for item in items:
             track = item.get("track")
             if track and track.get("uri"):
                 tracks.append(track["uri"])
+            else:
+                null_count += 1
+                # Log raw keys for debugging
+                if account_id and null_count <= 3:
+                    item_keys = list(item.keys())
+                    has_episode = "episode" in item_keys
+                    track_val = item.get("track")
+                    add_log(account_id, f"Null item keys={item_keys}, episode={has_episode}, track_type={type(track_val).__name__}")
+
+        if account_id:
+            add_log(account_id, f"Page {page}: {len(items)} items, {null_count} null, {len(tracks)} valid")
 
         if results.get("next"):
             try:
@@ -199,6 +227,23 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
                 break
         else:
             break
+
+    # If still no tracks, try sp.playlist() as last resort
+    if not tracks:
+        try:
+            if account_id:
+                add_log(account_id, "No tracks from playlist_tracks, trying sp.playlist()...")
+            pl_data = sp.playlist(playlist_id, market="from_token")
+            total = pl_data.get("tracks", {}).get("total", 0)
+            if account_id:
+                add_log(account_id, f"sp.playlist() reports {total} total tracks")
+            for item in pl_data.get("tracks", {}).get("items", []):
+                track = item.get("track")
+                if track and track.get("uri"):
+                    tracks.append(track["uri"])
+        except Exception as e:
+            if account_id:
+                add_log(account_id, f"sp.playlist() fallback error: {e}")
 
     if account_id:
         add_log(account_id, f"Total tracks found: {len(tracks)}")
@@ -283,14 +328,11 @@ def run_bot(account_id: str):
             return
 
         if not tracks:
-            add_log(account_id, f"Playlist {current_index + 1} is empty, skipping")
-            current_index += 1
-            _save_index(account_id, current_index)
-            continue
+            add_log(account_id, f"Could not read track list — will play anyway with fallback detection")
 
-        last_track_uri = tracks[-1]
-        first_track_uri = tracks[0]
-        track_set = set(tracks)
+        last_track_uri = tracks[-1] if tracks else None
+        first_track_uri = tracks[0] if tracks else None
+        track_set = set(tracks) if tracks else set()
 
         # Auto-follow playlist if not already saved
         try:
@@ -363,16 +405,16 @@ def run_bot(account_id: str):
                 break
 
             # Case 1b: Unknown track playing (not in playlist = autoplay injected)
-            if current_track_uri and current_track_uri not in track_set and last_track_seen:
+            if track_set and current_track_uri and current_track_uri not in track_set and last_track_seen:
                 add_log(account_id, "Unknown track detected (autoplay), advancing")
                 break
 
             # Track if we've seen the last track
-            if current_track_uri == last_track_uri:
+            if last_track_uri and current_track_uri == last_track_uri:
                 last_track_seen = True
 
             # Case 2: Looped back to track 1 after last track was seen
-            if last_track_seen and current_track_uri == first_track_uri:
+            if last_track_seen and first_track_uri and current_track_uri == first_track_uri:
                 progress = pb.get("progress_ms", 0)
                 if progress < 5000:
                     add_log(account_id, "Playlist looped to start, advancing")
