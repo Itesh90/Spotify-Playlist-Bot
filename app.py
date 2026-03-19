@@ -21,7 +21,7 @@ os.makedirs(TOKENS_DIR, exist_ok=True)
 
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000")
 REDIRECT_URI = f"{BASE_URL}/callback"
-SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-public user-read-currently-playing"
+SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public user-read-currently-playing"
 
 bot_threads: dict[str, threading.Thread] = {}
 bot_stop_flags: dict[str, threading.Event] = {}
@@ -176,13 +176,21 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
             return track["uri"]
         return None
 
-    # Primary: sp.playlist_tracks()
+    # Primary: try sp.playlist_items() (newer endpoint, no 403 issues)
+    results = None
     try:
-        results = sp.playlist_tracks(playlist_id)
-    except Exception as e:
-        if account_id:
-            add_log(account_id, f"playlist_tracks() error: {e}")
-        results = None
+        results = sp.playlist_items(playlist_id, additional_types=["track"])
+    except Exception:
+        pass
+
+    # Fallback to playlist_tracks without additional_types
+    if results is None:
+        try:
+            results = sp._get(f"playlists/{playlist_id}/tracks", limit=50, offset=0)
+        except Exception as e:
+            if account_id:
+                add_log(account_id, f"Track fetch error: {e}")
+            results = None
 
     if results:
         page = 1
