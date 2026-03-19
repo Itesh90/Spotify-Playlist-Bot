@@ -303,6 +303,13 @@ def run_bot(account_id: str):
             set_status(account_id, "error")
             return
 
+        # Re-find active device for each playlist
+        device_id = wait_for_device(sp, account_id)
+        if not device_id:
+            add_log(account_id, "No device found — open Spotify")
+            set_status(account_id, "error")
+            return
+
         # Get playlist track list for end detection
         try:
             tracks = get_playlist_tracks(sp, playlist_uri, account_id)
@@ -324,16 +331,39 @@ def run_bot(account_id: str):
         except Exception:
             pass  # Non-critical, continue even if follow fails
 
-        # Start playback on specific device
-        try:
-            sp.start_playback(context_uri=playlist_uri, device_id=device_id)
-            time.sleep(1)
-            sp.shuffle(False, device_id=device_id)
-            sp.repeat("off", device_id=device_id)
-        except Exception as e:
-            add_log(account_id, f"Failed to start playback: {e}")
+        # Start playback on specific device with retry
+        playback_started = False
+        for attempt in range(3):
+            try:
+                sp.start_playback(context_uri=playlist_uri, device_id=device_id)
+                time.sleep(3)
+
+                # Verify playback actually started
+                pb = sp.current_playback()
+                if pb and pb.get("is_playing"):
+                    current = pb.get("item", {}).get("name", "Unknown") if pb.get("item") else "Unknown"
+                    add_log(account_id, f"Now playing: {current}")
+                    playback_started = True
+                    break
+                else:
+                    add_log(account_id, f"Playback not confirmed (attempt {attempt + 1}/3)")
+            except Exception as e:
+                add_log(account_id, f"Start attempt {attempt + 1} failed: {e}")
+                # Try refreshing device
+                device_id = wait_for_device(sp, account_id, timeout=10)
+                if not device_id:
+                    break
+
+        if not playback_started:
+            add_log(account_id, "Could not start playback after 3 attempts")
             set_status(account_id, "error")
             return
+
+        try:
+            sp.shuffle(False, device_id=device_id)
+            sp.repeat("off", device_id=device_id)
+        except Exception:
+            pass
 
         set_status(account_id, "playing")
 
