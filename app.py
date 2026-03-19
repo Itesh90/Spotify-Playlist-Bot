@@ -270,7 +270,10 @@ def bot_worker(account):
             # ── Parse playback state ──────────────────────────────────────────
             if state is None:
                 null_count += 1
-                if null_count >= 3 and prev_playing and (time.time() - play_started_at > 30):
+                # FIX (Bug 2): Also fire if saw_last_track is True — prev_playing
+                # may have been cleared by a brief "paused at end" state before
+                # Spotify transitioned to None, so we must not rely on it alone.
+                if null_count >= 3 and (prev_playing or saw_last_track) and (time.time() - play_started_at > 30):
                     log("Playback stopped completely — advancing.")
                     null_count = 0
                     if not advance_to_next():
@@ -345,13 +348,17 @@ def bot_worker(account):
                     continue
 
             # ── Fallback: natural end (paused near end of last track) ─────────
+            # FIX (Bug 3): Spotify sometimes resets progress_ms to 0 instead of
+            # leaving it at ≈ duration after a track finishes. Accept both:
+            # near-end (within 2s of duration) AND near-start (within 2s of 0)
+            # when saw_last_track is set — the combination is unambiguous.
             near_end = (
                 not is_playing
                 and saw_last_track
                 and duration is not None
                 and duration > 0
                 and progress is not None
-                and progress >= duration - 2000
+                and (progress >= duration - 2000 or progress <= 2000)
             )
             if near_end:
                 log("Playlist ended naturally (last track finished).")
@@ -362,7 +369,11 @@ def bot_worker(account):
             # ── Track playing state for next cycle ────────────────────────────
             if is_playing:
                 prev_playing = True
-            else:
+            elif not saw_last_track:
+                # FIX (Bug 1): Do NOT clear prev_playing once the last track has
+                # been seen. Spotify briefly shows is_playing=False when a track
+                # finishes before transitioning to a None state. If we clear
+                # prev_playing here, the null_count guard can never fire.
                 prev_playing = False
 
 
