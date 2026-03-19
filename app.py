@@ -178,7 +178,7 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
 
     # Primary: sp.playlist_tracks()
     try:
-        results = sp.playlist_tracks(playlist_id, market="from_token")
+        results = sp.playlist_tracks(playlist_id)
     except Exception as e:
         if account_id:
             add_log(account_id, f"playlist_tracks() error: {e}")
@@ -210,7 +210,7 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
         try:
             if account_id:
                 add_log(account_id, "Trying sp.playlist() fallback...")
-            pl_data = sp.playlist(playlist_id, market="from_token")
+            pl_data = sp.playlist(playlist_id)
             for item in pl_data.get("tracks", {}).get("items", []):
                 uri = _extract_uri(item)
                 if uri:
@@ -227,20 +227,27 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     return tracks
 
 
-def wait_for_device(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> bool:
-    """Wait for an active Spotify device, polling every 5 seconds."""
+def wait_for_device(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> str | None:
+    """Wait for an active Spotify device. Returns device_id or None."""
     elapsed = 0
     while elapsed < timeout:
         try:
             devices = sp.devices()
-            if devices and devices.get("devices"):
-                return True
+            device_list = devices.get("devices", []) if devices else []
+            if device_list:
+                # Prefer the active device, otherwise pick the first one
+                active = next((d for d in device_list if d.get("is_active")), None)
+                chosen = active or device_list[0]
+                dev_name = chosen.get("name", "Unknown")
+                dev_id = chosen.get("id")
+                add_log(account_id, f"Found device: {dev_name}")
+                return dev_id
         except Exception:
             pass
         add_log(account_id, f"Waiting for active device... ({elapsed}s)")
         time.sleep(5)
         elapsed += 5
-    return False
+    return None
 
 
 def run_bot(account_id: str):
@@ -267,15 +274,16 @@ def run_bot(account_id: str):
     add_log(account_id, "Bot starting...")
 
     # Wait for an active Spotify device
-    if not wait_for_device(sp, account_id):
+    device_id = wait_for_device(sp, account_id)
+    if not device_id:
         add_log(account_id, "No active Spotify device found — open Spotify on any device")
         set_status(account_id, "error")
         return
 
     # Disable shuffle and repeat
     try:
-        sp.shuffle(False)
-        sp.repeat("off")
+        sp.shuffle(False, device_id=device_id)
+        sp.repeat("off", device_id=device_id)
     except Exception as e:
         add_log(account_id, f"Could not set shuffle/repeat: {e}")
 
@@ -316,12 +324,12 @@ def run_bot(account_id: str):
         except Exception:
             pass  # Non-critical, continue even if follow fails
 
-        # Start playback
+        # Start playback on specific device
         try:
-            sp.start_playback(context_uri=playlist_uri)
+            sp.start_playback(context_uri=playlist_uri, device_id=device_id)
             time.sleep(1)
-            sp.shuffle(False)
-            sp.repeat("off")
+            sp.shuffle(False, device_id=device_id)
+            sp.repeat("off", device_id=device_id)
         except Exception as e:
             add_log(account_id, f"Failed to start playback: {e}")
             set_status(account_id, "error")
