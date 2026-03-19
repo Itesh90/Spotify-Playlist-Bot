@@ -170,10 +170,11 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
         add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
 
     try:
-        results = sp.playlist_tracks(playlist_id, additional_types=())
+        playlist_data = sp.playlist(playlist_id)
+        results = playlist_data.get("tracks", {})
     except Exception as e:
         if account_id:
-            add_log(account_id, f"playlist_tracks() error: {e}")
+            add_log(account_id, f"playlist fetch error: {e}")
         return tracks
 
     page = 1
