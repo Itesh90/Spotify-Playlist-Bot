@@ -1,603 +1,565 @@
-from flask import Flask, render_template, jsonify, request
-import json, os, threading, time
+import os
+import re
+import json
+import time
+import uuid
+import threading
+from datetime import datetime
+
+from flask import Flask, request, jsonify, redirect, render_template, session
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
+# ─── App Setup ────────────────────────────────────────────────────────────────
+
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "spotify-bot-secret-key-change-me")
 
-ACCOUNTS_FILE = "accounts.json"
-TOKENS_DIR = "tokens"
-REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://localhost:5000/callback")
-POLL_INTERVAL = 5  # seconds
-DEBUG = False  # set True only when troubleshooting poll-cycle logs
-
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+TOKENS_DIR = os.path.join(DATA_DIR, "tokens")
 os.makedirs(TOKENS_DIR, exist_ok=True)
 
-bot_threads = {}   # account_id -> Thread
-bot_status = {}    # account_id -> { state, current_playlist, index, log }
-status_lock = threading.Lock()
+BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000")
+REDIRECT_URI = f"{BASE_URL}/callback"
+SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-public user-read-currently-playing"
+
+bot_threads: dict[str, threading.Thread] = {}
+bot_stop_flags: dict[str, threading.Event] = {}
+bot_locks: dict[str, threading.Lock] = {}
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# ─── Data Layer ───────────────────────────────────────────────────────────────
 
-def load_accounts():
-    if not os.path.exists(ACCOUNTS_FILE):
-        return []
-    with open(ACCOUNTS_FILE) as f:
+def _account_path(account_id: str) -> str:
+    return os.path.join(DATA_DIR, f"account_{account_id}.json")
+
+
+def _token_path(account_id: str) -> str:
+    return os.path.join(TOKENS_DIR, f"{account_id}.json")
+
+
+def load_account(account_id: str) -> dict | None:
+    path = _account_path(account_id)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
         return json.load(f)
 
 
-def save_accounts(accounts):
-    with open(ACCOUNTS_FILE, "w") as f:
-        json.dump(accounts, f, indent=2)
+def save_account(account_id: str, data: dict):
+    with open(_account_path(account_id), "w") as f:
+        json.dump(data, f, indent=2)
 
 
-SPOTIFY_SCOPE = (
-    "user-read-playback-state "
-    "user-modify-playback-state "
-    "playlist-modify-public "
-    "playlist-modify-private "
-    "playlist-read-private"
-)
+def load_all_accounts() -> list[dict]:
+    accounts = []
+    if not os.path.exists(DATA_DIR):
+        return accounts
+    for fname in os.listdir(DATA_DIR):
+        if fname.startswith("account_") and fname.endswith(".json"):
+            with open(os.path.join(DATA_DIR, fname), "r") as f:
+                accounts.append(json.load(f))
+    return accounts
 
 
-def get_sp(account):
-    return spotipy.Spotify(auth_manager=SpotifyOAuth(
+def delete_account_files(account_id: str):
+    path = _account_path(account_id)
+    if os.path.exists(path):
+        os.remove(path)
+    token_path = _token_path(account_id)
+    if os.path.exists(token_path):
+        os.remove(token_path)
+
+
+def new_account(name: str, client_id: str, client_secret: str) -> dict:
+    account_id = str(uuid.uuid4())[:8]
+    data = {
+        "id": account_id,
+        "name": name,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "playlists": [],
+        "current_index": 0,
+        "status": "idle",
+        "authorized": False,
+        "log": [],
+    }
+    save_account(account_id, data)
+    return data
+
+
+def add_log(account_id: str, message: str):
+    lock = bot_locks.get(account_id)
+    if lock:
+        lock.acquire()
+    try:
+        acc = load_account(account_id)
+        if not acc:
+            return
+        entry = {"time": datetime.now().strftime("%H:%M:%S"), "msg": message}
+        acc["log"].append(entry)
+        acc["log"] = acc["log"][-5:]
+        save_account(account_id, acc)
+    finally:
+        if lock:
+            lock.release()
+
+
+def set_status(account_id: str, status: str):
+    lock = bot_locks.get(account_id)
+    if lock:
+        lock.acquire()
+    try:
+        acc = load_account(account_id)
+        if not acc:
+            return
+        acc["status"] = status
+        save_account(account_id, acc)
+    finally:
+        if lock:
+            lock.release()
+
+
+# ─── Playlist URI Normalization ───────────────────────────────────────────────
+
+def normalize_playlist_uri(uri_or_url: str) -> str | None:
+    uri_or_url = uri_or_url.strip()
+    m = re.match(r"spotify:playlist:([a-zA-Z0-9]+)", uri_or_url)
+    if m:
+        return f"spotify:playlist:{m.group(1)}"
+    # Handle URLs, stripping query params
+    m = re.match(r"https?://open\.spotify\.com/playlist/([a-zA-Z0-9]+)", uri_or_url.split("?")[0])
+    if m:
+        return f"spotify:playlist:{m.group(1)}"
+    return None
+
+
+# ─── Spotify Auth Helpers ─────────────────────────────────────────────────────
+
+def get_oauth(account: dict) -> SpotifyOAuth:
+    return SpotifyOAuth(
         client_id=account["client_id"],
         client_secret=account["client_secret"],
         redirect_uri=REDIRECT_URI,
-        scope=SPOTIFY_SCOPE,
-        cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
-        open_browser=False,
-    ))
+        scope=SCOPE,
+        cache_path=_token_path(account["id"]),
+        show_dialog=True,
+    )
 
 
-def normalize_playlist_uri(raw):
-    """Convert Spotify share URLs to URIs, or return as-is if already a URI."""
-    raw = raw.strip()
-    if raw.startswith("https://open.spotify.com/playlist/"):
-        playlist_id = raw.split("/playlist/")[1].split("?")[0]
-        return f"spotify:playlist:{playlist_id}"
-    return raw
+def get_spotify(account: dict) -> spotipy.Spotify | None:
+    oauth = get_oauth(account)
+    token_info = oauth.get_cached_token()
+    if not token_info:
+        return None
+    if oauth.is_token_expired(token_info):
+        try:
+            token_info = oauth.refresh_access_token(token_info["refresh_token"])
+        except Exception:
+            return None
+    return spotipy.Spotify(auth=token_info["access_token"])
 
 
-def get_active_device(sp, fallback_id=None):
-    try:
-        devices = sp.devices().get("devices", [])
-        active = next((d["id"] for d in devices if d["is_active"]), None)
-        if active:
-            return active
-        if devices:
-            return devices[0]["id"]
-    except Exception:
-        pass
-    return fallback_id
+# ─── Bot Engine ───────────────────────────────────────────────────────────────
+
+def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str) -> list[str]:
+    playlist_id = playlist_uri.split(":")[-1]
+    tracks = []
+    results = sp.playlist_tracks(playlist_id, fields="items.track.uri,next")
+    while results:
+        for item in results.get("items", []):
+            track = item.get("track")
+            if track and track.get("uri"):
+                tracks.append(track["uri"])
+        if results.get("next"):
+            results = sp.next(results)
+        else:
+            break
+    return tracks
 
 
-def ensure_playlist_followed(sp, playlist_uri):
-    """Follow the playlist if the user hasn't already saved it."""
-    try:
-        playlist_id = playlist_uri.split(":")[-1]
-        user_id = sp.current_user()["id"]
-        already_following = sp.playlist_is_following(playlist_id, [user_id])
-        if already_following and already_following[0]:
-            return
-        sp.current_user_follow_playlist(playlist_id)
-    except Exception:
-        pass  # Non-fatal — don't crash the bot over this
-
-
-def get_playlist_track_uris(sp, playlist_uri):
-    """Fetch all track URIs from a playlist. Returns (ordered_list, uri_set)."""
-    try:
-        pl_id = playlist_uri.split(":")[-1]
-        results = sp.playlist_tracks(pl_id, limit=100)
-        ordered = []  # keeps track order
-        uris = set()
-        while results:
-            for item in results.get("items", []):
-                track = item.get("track")
-                if track and track.get("uri"):
-                    ordered.append(track["uri"])
-                    uris.add(track["uri"])
-            if results.get("next"):
-                results = sp.next(results)
-            else:
-                break
-        return ordered, uris  # return BOTH
-    except Exception:
-        return [], set()
-
-
-# ─── Bot Worker ───────────────────────────────────────────────────────────────
-
-def bot_worker(account):
-    aid = account["id"]
-    # FIX (Bug 3): Normalize all playlist URIs at worker start so that
-    # playlists saved via add_account (which skipped normalization) are
-    # also converted from share-URLs to spotify:playlist:... URIs before
-    # any sp.start_playback() call.
-    playlists = [normalize_playlist_uri(p) for p in account.get("playlists", [])]
-
-    with status_lock:
-        bot_status[aid] = {
-            "state": "starting",
-            "current_playlist": "",
-            "index": 0,
-            "log": [],
-        }
-
-    def log(msg):
-        entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
-        with status_lock:
-            if not isinstance(bot_status[aid].get("log"), list):
-                bot_status[aid]["log"] = []
-            bot_status[aid]["log"].append(entry)
-            if len(bot_status[aid]["log"]) > 50:
-                bot_status[aid]["log"].pop(0)
-
-    def set_state(state, **kwargs):
-        with status_lock:
-            bot_status[aid]["state"] = state
-            for key in ("current_playlist", "index"):
-                if key in kwargs:
-                    bot_status[aid][key] = kwargs[key]
-
-    def should_stop():
-        with status_lock:
-            return bot_status[aid].get("state") in ("stopped", "error")
-
-    if not playlists:
-        set_state("error")
-        log("No playlists configured. Add playlists before starting.")
+def run_bot(account_id: str):
+    stop_flag = bot_stop_flags.get(account_id)
+    if not stop_flag:
         return
 
+    acc = load_account(account_id)
+    if not acc:
+        return
+
+    if not acc["playlists"]:
+        add_log(account_id, "No playlists to play")
+        set_status(account_id, "error")
+        return
+
+    sp = get_spotify(acc)
+    if not sp:
+        add_log(account_id, "Not authorized — click Authorize")
+        set_status(account_id, "error")
+        return
+
+    set_status(account_id, "starting")
+    add_log(account_id, "Bot starting...")
+
+    # Disable shuffle and repeat
     try:
-        sp = get_sp(account)
+        sp.shuffle(False)
+        sp.repeat("off")
+    except Exception as e:
+        add_log(account_id, f"Could not set shuffle/repeat: {e}")
 
-        # FIX (Bug 5): Also catch SpotifyException HTTP 401 (invalid/expired
-        # token) so the friendly "Not authorized" message is shown instead of
-        # crashing the thread with a bare re-raise.
-        try:
-            sp.current_user()
-        except (EOFError, spotipy.exceptions.SpotifyException) as e:
-            e_str = str(e)
-            if "401" in e_str or "403" in e_str or "PREMIUM_REQUIRED" in e_str:
-                if "PREMIUM_REQUIRED" in e_str or "403" in e_str:
-                    set_state("error")
-                    log("Spotify Premium is required to control playback.")
-                else:
-                    set_state("error")
-                    log("Not authorized. Click \"🔑 Authorize\" first, then Start.")
-                return
-            # Any other SpotifyException or EOFError → not authorized
-            set_state("error")
-            log("Not authorized. Click \"🔑 Authorize\" first, then Start.")
-            return
-
-        device_id = get_active_device(sp)
-        if not device_id:
-            set_state("error")
-            log("No Spotify device found. Open Spotify on a device first.")
-            return
-
-        # Disable shuffle/repeat for clean sequential play
-        try:
-            sp.shuffle(False, device_id=device_id)
-            sp.repeat("off", device_id=device_id)
-        except Exception:
-            pass  # Non-fatal — proceed regardless
-
+    current_index = acc.get("current_index", 0)
+    if current_index >= len(acc["playlists"]):
         current_index = 0
-        sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
-        current_context = playlists[current_index]
-        ensure_playlist_followed(sp, current_context)
-        set_state("playing", current_playlist=current_context, index=current_index)
-        log(f"Started playlist {current_index + 1} of {len(playlists)}")
 
-        # Fetch all track URIs for the current playlist (ordered + set)
-        _ordered, playlist_track_uris = get_playlist_track_uris(sp, current_context)
-        playlist_last_uri = _ordered[-1] if _ordered else None
-        if playlist_track_uris:
-            log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
-        else:
-            log("⚠️ Could not load track URIs — re-authorize to enable autoplay detection")
-        time.sleep(3)  # Let Spotify register playback
+    while not stop_flag.is_set() and current_index < len(acc["playlists"]):
+        playlist_uri = acc["playlists"][current_index]
+        playlist_id = playlist_uri.split(":")[-1]
+        add_log(account_id, f"Playing playlist {current_index + 1}/{len(acc['playlists'])}")
 
-        def advance_to_next():
-            """Advance to the next playlist. Returns True if advanced, False if all done."""
-            nonlocal current_index, current_context, device_id
-            nonlocal playlist_track_uris, playlist_last_uri, prev_playing, saw_last_track,play_started_at
+        # Re-read token in case it was refreshed
+        sp = get_spotify(load_account(account_id))
+        if not sp:
+            add_log(account_id, "Token expired — re-authorize")
+            set_status(account_id, "error")
+            return
+
+        # Get playlist track list for end detection
+        try:
+            tracks = get_playlist_tracks(sp, playlist_uri)
+        except Exception as e:
+            add_log(account_id, f"Failed to fetch tracks: {e}")
+            set_status(account_id, "error")
+            return
+
+        if not tracks:
+            add_log(account_id, f"Playlist {current_index + 1} is empty, skipping")
             current_index += 1
-            if current_index >= len(playlists):
-                set_state("done")
-                log("All playlists finished.")
-                return False
-            # FIX (Bug 4): Wrap start_playback in try/except so a transient
-            # API error (device offline, token hiccup) logs a clear message
-            # and returns False gracefully instead of crashing the thread.
-            try:
-                device_id = get_active_device(sp, fallback_id=device_id)
-                sp.start_playback(device_id=device_id, context_uri=playlists[current_index])
-            except spotipy.exceptions.SpotifyException as e:
-                log(f"Failed to start playlist {current_index + 1}: {e}")
-                set_state("error")
-                return False
-            except Exception as e:
-                log(f"Unexpected error starting playlist {current_index + 1}: {e}")
-                set_state("error")
-                return False
-            current_context = playlists[current_index]
-            ensure_playlist_followed(sp, current_context)
-            set_state("playing", current_playlist=current_context, index=current_index)
-            log(f"Moved to playlist {current_index + 1} of {len(playlists)}")
-            _ordered, playlist_track_uris = get_playlist_track_uris(sp, current_context)
-            playlist_last_uri = _ordered[-1] if _ordered else None
-            saw_last_track = False
-            log(f"Loaded {len(playlist_track_uris)} track URIs for detection")
-            # FIX (Bug 1, part of): Reset prev_playing to True here so the
-            # null_count guard in the polling loop works correctly on the
-            # newly started playlist.
-            prev_playing = True
-            play_started_at = time.time()
-            time.sleep(3)
-            return True
+            _save_index(account_id, current_index)
+            continue
 
-        # ── Main polling loop ─────────────────────────────────────────────────
+        last_track_uri = tracks[-1]
+        first_track_uri = tracks[0]
+        track_set = set(tracks)
 
-        # FIX (Bug 1): Track whether we were ever truly playing (not just
-        # "not paused"). prev_playing is now ONLY set to False when Spotify
-        # explicitly tells us is_playing=False AND progress is not near end,
-        # so it stays True across the paused-end state that precedes a None
-        # state — allowing null_count to fire correctly.
-        prev_playing = True
-        null_count = 0
-        saw_last_track = False   # True once we see the final track playing
-        play_started_at = time.time()
+        # Auto-follow playlist if not already saved
+        try:
+            sp.current_user_follow_playlist(playlist_id)
+        except Exception:
+            pass  # Non-critical, continue even if follow fails
 
-        while not should_stop():
-            time.sleep(POLL_INTERVAL)
+        # Start playback
+        try:
+            sp.start_playback(context_uri=playlist_uri)
+            time.sleep(1)
+            sp.shuffle(False)
+            sp.repeat("off")
+        except Exception as e:
+            add_log(account_id, f"Failed to start playback: {e}")
+            set_status(account_id, "error")
+            return
 
-            if should_stop():
-                break
+        set_status(account_id, "playing")
+
+        # ── Polling loop ──
+        last_track_seen = False
+        pause_count = 0
+        none_count = 0
+
+        while not stop_flag.is_set():
+            time.sleep(5)
+
+            # Re-get spotify client to handle token refresh
+            acc_fresh = load_account(account_id)
+            if not acc_fresh:
+                return
+            sp = get_spotify(acc_fresh)
+            if not sp:
+                add_log(account_id, "Token lost during playback — re-authorize")
+                set_status(account_id, "error")
+                return
 
             try:
-                state = sp.current_playback()
+                pb = sp.current_playback()
             except Exception as e:
-                log(f"Poll error: {e}")
-                continue
-
-            # ── Parse playback state ──────────────────────────────────────────
-            if state is None:
-                null_count += 1
-                if null_count >= 3 and (prev_playing or saw_last_track) and (time.time() - play_started_at > 30):
-                    log("Playback stopped completely — advancing.")
-                    null_count = 0
-                    if not advance_to_next():
-                        break
-                continue
-
-            null_count = 0
-            is_playing = state.get("is_playing", False)
-            item = state.get("item")
-            current_track_uri = item.get("uri") if item else None
-            progress = state.get("progress_ms")
-            duration = item.get("duration_ms") if item else None
-            ctx = state.get("context")
-            state_context = ctx.get("uri") if isinstance(ctx, dict) else None
-
-            # ── Debug log every poll (gated behind DEBUG flag) ────────────────
-            if DEBUG:
-                track_name = item.get("name", "?") if item else "None"
-                log(f"[DBG] playing={is_playing} track='{track_name}' "
-                    f"ctx_match={state_context == current_context} "
-                    f"in_set={current_track_uri in playlist_track_uris if current_track_uri else '?'} "
-                    f"saw_last={saw_last_track}")
-
-            # ── Sync if user manually switched to another configured playlist ─
-            if state_context and state_context != current_context and state_context in playlists:
-                current_index = playlists.index(state_context)
-                current_context = state_context
-                _ordered, playlist_track_uris = get_playlist_track_uris(sp, current_context)
-                playlist_last_uri = _ordered[-1] if _ordered else None
-                saw_last_track = False
-                set_state("playing", current_playlist=current_context, index=current_index)
-                log(f"Synced to playlist {current_index + 1} (user switched manually)")
-                prev_playing = is_playing
-                continue
-
-            # ── Last-track flag ───────────────────────────────────────────────
-            if is_playing and current_track_uri and playlist_last_uri:
-                if current_track_uri == playlist_last_uri:
-                    saw_last_track = True
-
-            # ── Loop detection (playlist restarted from song 1) ───────────────
-            if saw_last_track and is_playing and current_track_uri:
-                if current_track_uri != playlist_last_uri:
-                    log("Playlist looped/ended — advancing to next playlist.")
-                    saw_last_track = False
-                    if not advance_to_next():
-                        break
-                    continue
-
-            # ── Autoplay detection (3-layer) ──────────────────────────────────
-            if is_playing and current_track_uri:
-
-                # Layer 1: context gone (contextless autoplay)
-                if state_context is None:
-                    log("Autoplay detected (no context) — advancing.")
-                    if not advance_to_next():
-                        break
-                    continue
-
-                # Layer 2: context changed to unknown playlist
-                if state_context != current_context and state_context not in playlists:
-                    log("Autoplay detected (different context) — advancing.")
-                    if not advance_to_next():
-                        break
-                    continue
-
-                # Layer 3: track not in our playlist's URI set
-                if playlist_track_uris and current_track_uri not in playlist_track_uris:
-                    log("Autoplay detected (unknown track) — advancing.")
-                    if not advance_to_next():
-                        break
-                    continue
-
-            # ── Fallback: natural end (paused near end of last track) ─────────
-            near_end = (
-                not is_playing
-                and saw_last_track
-                and duration is not None
-                and duration > 0
-                and progress is not None
-                and (progress >= duration - 2000 or progress <= 2000)
-            )
-            if near_end:
-                log("Playlist ended naturally (last track finished).")
-                if not advance_to_next():
+                add_log(account_id, f"Playback API error: {e}")
+                none_count += 1
+                if none_count >= 3:
+                    add_log(account_id, "Playback unreachable (3x), advancing")
                     break
                 continue
 
-            # ── Track playing state for next cycle ────────────────────────────
-            if is_playing:
-                prev_playing = True
-            elif not saw_last_track:
-                prev_playing = False
+            # Case: playback returns None (device off/disconnected)
+            if pb is None:
+                none_count += 1
+                if none_count >= 3:
+                    add_log(account_id, "No playback data (3x), advancing")
+                    break
+                continue
+            else:
+                none_count = 0
+
+            current_track_uri = None
+            if pb.get("item"):
+                current_track_uri = pb["item"].get("uri")
+
+            is_playing = pb.get("is_playing", False)
+            context = pb.get("context")
+            context_uri = context.get("uri") if context else None
+
+            # Case 1: Context changed (Spotify autoplay kicked in)
+            if context_uri and context_uri != playlist_uri:
+                add_log(account_id, "Context changed (autoplay detected), advancing")
+                break
+
+            # Case 1b: Unknown track playing (not in playlist = autoplay injected)
+            if current_track_uri and current_track_uri not in track_set and last_track_seen:
+                add_log(account_id, "Unknown track detected (autoplay), advancing")
+                break
+
+            # Track if we've seen the last track
+            if current_track_uri == last_track_uri:
+                last_track_seen = True
+
+            # Case 2: Looped back to track 1 after last track was seen
+            if last_track_seen and current_track_uri == first_track_uri:
+                progress = pb.get("progress_ms", 0)
+                if progress < 5000:
+                    add_log(account_id, "Playlist looped to start, advancing")
+                    break
+
+            # Case 3: Paused after last track was seen
+            if last_track_seen and not is_playing:
+                pause_count += 1
+                if pause_count >= 2:
+                    add_log(account_id, "Playback paused after last track, advancing")
+                    break
+            else:
+                pause_count = 0
+
+        # Advance to next playlist
+        current_index += 1
+        _save_index(account_id, current_index)
+
+    # All playlists done or stopped
+    if stop_flag.is_set():
+        add_log(account_id, "Bot stopped by user")
+        set_status(account_id, "idle")
+    else:
+        add_log(account_id, "All playlists completed!")
+        set_status(account_id, "done")
 
 
-    except spotipy.exceptions.SpotifyException as e:
-        set_state("error")
-        log(f"Spotify API error: {e}")
-    except Exception as e:
-        set_state("error")
-        log(f"Unexpected error: {e}")
+def _save_index(account_id: str, index: int):
+    lock = bot_locks.get(account_id)
+    if lock:
+        lock.acquire()
+    try:
+        acc = load_account(account_id)
+        if acc:
+            acc["current_index"] = index
+            save_account(account_id, acc)
+    finally:
+        if lock:
+            lock.release()
 
 
-# ─── Flask Routes ─────────────────────────────────────────────────────────────
+def start_bot(account_id: str) -> str | None:
+    if account_id in bot_threads and bot_threads[account_id].is_alive():
+        return "Bot is already running"
+
+    acc = load_account(account_id)
+    if not acc:
+        return "Account not found"
+    if not acc.get("authorized"):
+        msg = "Account not authorized — click Authorize first"
+        add_log(account_id, msg)
+        set_status(account_id, "error")
+        return msg
+    if not acc["playlists"]:
+        msg = "No playlists added"
+        add_log(account_id, msg)
+        set_status(account_id, "error")
+        return msg
+
+    # Reset state
+    acc["current_index"] = 0
+    acc["status"] = "starting"
+    save_account(account_id, acc)
+
+    stop_flag = threading.Event()
+    bot_stop_flags[account_id] = stop_flag
+    if account_id not in bot_locks:
+        bot_locks[account_id] = threading.Lock()
+
+    t = threading.Thread(target=run_bot, args=(account_id,), daemon=True)
+    bot_threads[account_id] = t
+    t.start()
+    return None
+
+
+def stop_bot(account_id: str) -> str | None:
+    flag = bot_stop_flags.get(account_id)
+    if flag:
+        flag.set()
+    if account_id in bot_threads:
+        bot_threads[account_id].join(timeout=10)
+        del bot_threads[account_id]
+    if account_id in bot_stop_flags:
+        del bot_stop_flags[account_id]
+    set_status(account_id, "idle")
+    return None
+
+
+# ─── API Routes ───────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
-@app.route("/callback")
-def callback():
-    """Spotify OAuth callback — exchange the code for a token."""
-    code = request.args.get("code")
-    error = request.args.get("error")
-    state = request.args.get("state")  # account ID passed as state
-
-    if error:
-        return f"OAuth error: {error}", 400
-    if not code:
-        return "OAuth error: no code returned.", 400
-
-    accounts = load_accounts()
-
-    # Find the specific account by state (account ID)
-    target_accounts = [a for a in accounts if a["id"] == state] if state else accounts
-    if not target_accounts:
-        target_accounts = accounts  # fallback: try all
-
-    exchanged = False
-    for account in target_accounts:
-        try:
-            auth_manager = SpotifyOAuth(
-                client_id=account["client_id"],
-                client_secret=account["client_secret"],
-                redirect_uri=REDIRECT_URI,
-                scope=SPOTIFY_SCOPE,
-                cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
-                open_browser=False,
-            )
-            auth_manager.get_access_token(code, as_dict=False)
-            exchanged = True
-            break
-        except Exception:
-            continue
-
-    if not exchanged:
-        return "OAuth error: could not exchange code. Make sure you added the correct Client ID and Secret.", 400
-
-    return """
-    <html><body style="background:#0a0a0a;color:#1db954;font-family:monospace;
-    display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-    <div style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:1rem">&#10003;</div>
-        <div>Spotify authentication successful.</div>
-        <div style="color:#666;margin-top:.5rem;font-size:.85rem">
-            You can close this tab and return to the dashboard.
-        </div>
-    </div></body></html>
-    """
-
-
-@app.route("/api/accounts")
-def api_accounts():
-    accounts = load_accounts()
-    result = []
+@app.route("/api/accounts", methods=["GET"])
+def api_list_accounts():
+    accounts = load_all_accounts()
+    safe = []
     for a in accounts:
-        with status_lock:
-            status = bot_status.get(a["id"], {
-                "state": "idle",
-                "current_playlist": "",
-                "index": 0,
-                "log": [],
-            })
-            status_copy = dict(status)
-        result.append({
+        running = account_id_running(a["id"])
+        safe.append({
             "id": a["id"],
-            "client_id": a["client_id"],
-            "playlists": a.get("playlists", []),
-            "status": status_copy,
+            "name": a["name"],
+            "playlists": a["playlists"],
+            "current_index": a["current_index"],
+            "status": a["status"] if not running else a["status"],
+            "authorized": a.get("authorized", False),
+            "log": a.get("log", []),
+            "running": running,
         })
-    return jsonify(result)
+    return jsonify(safe)
+
+
+def account_id_running(account_id: str) -> bool:
+    return account_id in bot_threads and bot_threads[account_id].is_alive()
 
 
 @app.route("/api/accounts", methods=["POST"])
-def add_account():
+def api_add_account():
     data = request.json
-    if not data or not all(k in data for k in ("id", "client_id", "client_secret")):
-        return jsonify({"error": "Missing required fields"}), 400
-    accounts = load_accounts()
-    if any(a["id"] == data["id"] for a in accounts):
-        return jsonify({"error": "Account ID already exists"}), 409
-    # FIX (Bug 3): Normalize playlist URIs on account creation, just like
-    # update_playlists does — so share URLs are converted immediately.
-    accounts.append({
-        "id": data["id"],
-        "client_id": data["client_id"],
-        "client_secret": data["client_secret"],
-        "playlists": [normalize_playlist_uri(p) for p in data.get("playlists", [])],
-    })
-    save_accounts(accounts)
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+    name = data.get("name", "").strip()
+    client_id = data.get("client_id", "").strip()
+    client_secret = data.get("client_secret", "").strip()
+    if not name or not client_id or not client_secret:
+        return jsonify({"error": "name, client_id, client_secret are required"}), 400
+    acc = new_account(name, client_id, client_secret)
+    return jsonify(acc), 201
+
+
+@app.route("/api/accounts/<account_id>", methods=["DELETE"])
+def api_delete_account(account_id):
+    stop_bot(account_id)
+    delete_account_files(account_id)
     return jsonify({"ok": True})
 
 
-@app.route("/api/accounts/<aid>/auth-url")
-def get_auth_url(aid):
-    """Generate the Spotify OAuth URL for a specific account."""
-    accounts = load_accounts()
-    account = next((a for a in accounts if a["id"] == aid), None)
-    if not account:
+@app.route("/api/accounts/<account_id>/playlists", methods=["POST"])
+def api_add_playlist(account_id):
+    acc = load_account(account_id)
+    if not acc:
         return jsonify({"error": "Account not found"}), 404
-    auth_manager = SpotifyOAuth(
-        client_id=account["client_id"],
-        client_secret=account["client_secret"],
-        redirect_uri=REDIRECT_URI,
-        scope=SPOTIFY_SCOPE,
-        cache_path=f"{TOKENS_DIR}/.cache-{account['id']}",
-        open_browser=False,
-        state=aid,  # Pass account ID as state so callback can identify it
-    )
-    url = auth_manager.get_authorize_url(state=aid)
-    return jsonify({"url": url})
+    data = request.json
+    uri = data.get("uri", "").strip() if data else ""
+    normalized = normalize_playlist_uri(uri)
+    if not normalized:
+        return jsonify({"error": "Invalid playlist URI or URL"}), 400
+    if normalized in acc["playlists"]:
+        return jsonify({"error": "Playlist already added"}), 400
+    acc["playlists"].append(normalized)
+    save_account(account_id, acc)
+    return jsonify({"ok": True, "playlists": acc["playlists"]})
 
 
-@app.route("/api/accounts/<aid>/token-status")
-def get_token_status(aid):
-    """Check if a cached token exists for the account."""
-    cache_path = f"{TOKENS_DIR}/.cache-{aid}"
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path) as f:
-                token_info = json.load(f)
-            has_token = bool(token_info.get("access_token"))
-            return jsonify({"authorized": has_token})
-        except Exception:
-            pass
-    return jsonify({"authorized": False})
-
-
-@app.route("/api/accounts/<aid>", methods=["DELETE"])
-def delete_account(aid):
-    accounts = [a for a in load_accounts() if a["id"] != aid]
-    save_accounts(accounts)
-    with status_lock:
-        if aid in bot_status:
-            bot_status[aid]["state"] = "stopped"
-    # Don't pop bot_status here — the thread needs it to exit cleanly
-    return jsonify({"ok": True})
-
-
-@app.route("/api/accounts/<aid>/playlists", methods=["POST"])
-def update_playlists(aid):
-    accounts = load_accounts()
-    found = False
-    for a in accounts:
-        if a["id"] == aid:
-            a["playlists"] = [normalize_playlist_uri(p) for p in request.json.get("playlists", [])]
-            found = True
-    if not found:
+@app.route("/api/accounts/<account_id>/playlists/<int:playlist_index>", methods=["DELETE"])
+def api_remove_playlist(account_id, playlist_index):
+    acc = load_account(account_id)
+    if not acc:
         return jsonify({"error": "Account not found"}), 404
-    save_accounts(accounts)
+    if playlist_index < 0 or playlist_index >= len(acc["playlists"]):
+        return jsonify({"error": "Invalid playlist index"}), 400
+    acc["playlists"].pop(playlist_index)
+    save_account(account_id, acc)
+    return jsonify({"ok": True, "playlists": acc["playlists"]})
+
+
+@app.route("/api/accounts/<account_id>/start", methods=["POST"])
+def api_start_bot(account_id):
+    err = start_bot(account_id)
+    if err:
+        return jsonify({"error": err}), 400
     return jsonify({"ok": True})
 
 
-@app.route("/api/bot/<aid>/start", methods=["POST"])
-def start_bot(aid):
-    accounts = load_accounts()
-    account = next((a for a in accounts if a["id"] == aid), None)
-    if not account:
-        return jsonify({"error": "Account not found"}), 404
-    if not account.get("playlists"):
-        return jsonify({"error": "No playlists configured"}), 400
-
-    # Check if token exists — user must Authorize first
-    cache_path = f"{TOKENS_DIR}/.cache-{aid}"
-    if not os.path.exists(cache_path):
-        return jsonify({"error": "Not authorized. Click 🔑 Authorize first."}), 400
-
-    if aid in bot_threads and bot_threads[aid].is_alive():
-        return jsonify({"error": "Bot already running"}), 400
-    t = threading.Thread(target=bot_worker, args=(account,), daemon=True)
-    bot_threads[aid] = t
-    t.start()
+@app.route("/api/accounts/<account_id>/stop", methods=["POST"])
+def api_stop_bot(account_id):
+    stop_bot(account_id)
     return jsonify({"ok": True})
 
 
-@app.route("/api/bot/<aid>/stop", methods=["POST"])
-def stop_bot(aid):
-    with status_lock:
-        if aid in bot_status:
-            bot_status[aid]["state"] = "stopped"
+@app.route("/api/start-all", methods=["POST"])
+def api_start_all():
+    accounts = load_all_accounts()
+    results = {}
+    for acc in accounts:
+        err = start_bot(acc["id"])
+        results[acc["id"]] = err or "started"
+    return jsonify(results)
+
+
+@app.route("/api/stop-all", methods=["POST"])
+def api_stop_all():
+    accounts = load_all_accounts()
+    for acc in accounts:
+        stop_bot(acc["id"])
     return jsonify({"ok": True})
 
 
-@app.route("/api/bot/<aid>/status")
-def get_bot_status(aid):
-    with status_lock:
-        status = bot_status.get(aid, {"state": "idle", "log": []})
-        return jsonify(dict(status))
+# ─── OAuth Routes ─────────────────────────────────────────────────────────────
+
+@app.route("/auth/<account_id>")
+def auth_login(account_id):
+    acc = load_account(account_id)
+    if not acc:
+        return "Account not found", 404
+    oauth = get_oauth(acc)
+    auth_url = oauth.get_authorize_url(state=account_id)
+    return redirect(auth_url)
 
 
-@app.route("/api/bot/start-all", methods=["POST"])
-def start_all_bots():
-    accounts = load_accounts()
-    started = []
-    errors = []
-    for account in accounts:
-        aid = account["id"]
-        with status_lock:
-            current_state = bot_status.get(aid, {}).get("state", "idle")
-        if current_state in ("playing", "starting"):
-            continue  # Already running
-        if not account.get("playlists"):
-            errors.append(f"{aid}: no playlists")
-            continue
-        cache_path = f"{TOKENS_DIR}/.cache-{aid}"
-        if not os.path.exists(cache_path):
-            errors.append(f"{aid}: not authorized")
-            continue
-        if aid in bot_threads and bot_threads[aid].is_alive():
-            continue
-        t = threading.Thread(target=bot_worker, args=(account,), daemon=True)
-        bot_threads[aid] = t
-        t.start()
-        started.append(aid)
-    return jsonify({"started": started, "errors": errors})
+@app.route("/callback")
+def auth_callback():
+    code = request.args.get("code")
+    state = request.args.get("state")
+    if not code or not state:
+        return "Missing code or state", 400
 
+    account_id = state
+    acc = load_account(account_id)
+    if not acc:
+        return "Account not found", 404
+
+    oauth = get_oauth(acc)
+    try:
+        oauth.get_access_token(code, as_dict=True)
+    except Exception as e:
+        return f"Auth failed: {e}", 500
+
+    acc["authorized"] = True
+    save_account(account_id, acc)
+    add_log(account_id, "Authorization successful")
+    return redirect("/")
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

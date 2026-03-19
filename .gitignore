@@ -1,9 +1,29 @@
-# .gitignore
-accounts.json
-tokens/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-.env
-venv/
+*.py[cod]
+*$py.class
+
+# Virtual environment
 .venv/
+venv/
+ENV/
+
+# Data files (tokens and account configs)
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Agent config (not needed for runtime)
 .agent/
+
+# Misc
+*.log
