@@ -98,7 +98,7 @@ def add_log(account_id: str, message: str):
             return
         entry = {"time": datetime.now().strftime("%H:%M:%S"), "msg": message}
         acc["log"].append(entry)
-        acc["log"] = acc["log"][-5:]
+        acc["log"] = acc["log"][-20:]
         save_account(account_id, acc)
     finally:
         if lock:
@@ -162,20 +162,64 @@ def get_spotify(account: dict) -> spotipy.Spotify | None:
 
 # ─── Bot Engine ───────────────────────────────────────────────────────────────
 
-def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str) -> list[str]:
+def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str = None) -> list[str]:
     playlist_id = playlist_uri.split(":")[-1]
     tracks = []
-    results = sp.playlist_tracks(playlist_id, fields="items.track.uri,next")
+
+    if account_id:
+        add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
+
+    try:
+        results = sp.playlist_tracks(playlist_id)
+    except Exception as e:
+        if account_id:
+            add_log(account_id, f"playlist_tracks() error: {e}")
+        return tracks
+
+    page = 1
     while results:
-        for item in results.get("items", []):
+        items = results.get("items", [])
+        null_tracks = sum(1 for i in items if not i.get("track"))
+
+        if account_id:
+            add_log(account_id, f"Page {page}: {len(items)} items, {null_tracks} null tracks")
+
+        for item in items:
             track = item.get("track")
             if track and track.get("uri"):
                 tracks.append(track["uri"])
+
         if results.get("next"):
-            results = sp.next(results)
+            try:
+                results = sp.next(results)
+                page += 1
+            except Exception as e:
+                if account_id:
+                    add_log(account_id, f"Pagination error: {e}")
+                break
         else:
             break
+
+    if account_id:
+        add_log(account_id, f"Total tracks found: {len(tracks)}")
+
     return tracks
+
+
+def wait_for_device(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> bool:
+    """Wait for an active Spotify device, polling every 5 seconds."""
+    elapsed = 0
+    while elapsed < timeout:
+        try:
+            devices = sp.devices()
+            if devices and devices.get("devices"):
+                return True
+        except Exception:
+            pass
+        add_log(account_id, f"Waiting for active device... ({elapsed}s)")
+        time.sleep(5)
+        elapsed += 5
+    return False
 
 
 def run_bot(account_id: str):
@@ -201,6 +245,12 @@ def run_bot(account_id: str):
     set_status(account_id, "starting")
     add_log(account_id, "Bot starting...")
 
+    # Wait for an active Spotify device
+    if not wait_for_device(sp, account_id):
+        add_log(account_id, "No active Spotify device found — open Spotify on any device")
+        set_status(account_id, "error")
+        return
+
     # Disable shuffle and repeat
     try:
         sp.shuffle(False)
@@ -215,7 +265,7 @@ def run_bot(account_id: str):
     while not stop_flag.is_set() and current_index < len(acc["playlists"]):
         playlist_uri = acc["playlists"][current_index]
         playlist_id = playlist_uri.split(":")[-1]
-        add_log(account_id, f"Playing playlist {current_index + 1}/{len(acc['playlists'])}")
+        add_log(account_id, f"Playing playlist {current_index + 1}/{len(acc['playlists'])} ({playlist_id})")
 
         # Re-read token in case it was refreshed
         sp = get_spotify(load_account(account_id))
@@ -226,7 +276,7 @@ def run_bot(account_id: str):
 
         # Get playlist track list for end detection
         try:
-            tracks = get_playlist_tracks(sp, playlist_uri)
+            tracks = get_playlist_tracks(sp, playlist_uri, account_id)
         except Exception as e:
             add_log(account_id, f"Failed to fetch tracks: {e}")
             set_status(account_id, "error")
