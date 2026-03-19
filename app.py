@@ -21,7 +21,7 @@ os.makedirs(TOKENS_DIR, exist_ok=True)
 
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000")
 REDIRECT_URI = f"{BASE_URL}/callback"
-SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public user-read-currently-playing"
+SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-public user-read-currently-playing"
 
 bot_threads: dict[str, threading.Thread] = {}
 bot_stop_flags: dict[str, threading.Event] = {}
@@ -169,57 +169,81 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     if account_id:
         add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
 
-    def _extract_uri(item_obj):
-        """Extract track URI - handles both 'track' and 'item' keys."""
-        for key in ("track", "item"):
-            obj = item_obj.get(key)
-            if obj and isinstance(obj, dict):
-                uri = obj.get("uri")
-                if uri and uri.startswith("spotify:track:"):
-                    return uri
-        return None
-
-    # Use sp.playlist() as primary — other endpoints return 403
+    # Try playlist_tracks with market and additional_types
     try:
-        pl_data = sp.playlist(playlist_id)
-        tracks_data = pl_data.get("tracks", {})
-        total = tracks_data.get("total", 0)
-
-        if account_id:
-            add_log(account_id, f"Playlist has {total} tracks (reported by Spotify)")
-
-        # Log first item structure for debugging
-        first_items = tracks_data.get("items", [])
-        if account_id and first_items:
-            add_log(account_id, f"First item keys: {list(first_items[0].keys())}")
-
-        # Extract from first page
-        for item in first_items:
-            uri = _extract_uri(item)
-            if uri:
-                tracks.append(uri)
-
-        # Paginate if more tracks exist
-        page = 1
-        while tracks_data.get("next"):
-            page += 1
-            try:
-                tracks_data = sp.next(tracks_data)
-                if not tracks_data:
-                    break
-                for item in tracks_data.get("items", []):
-                    uri = _extract_uri(item)
-                    if uri:
-                        tracks.append(uri)
-            except Exception:
-                break
-
-        if account_id:
-            add_log(account_id, f"Extracted {len(tracks)} URIs from {page} page(s)")
-
+        results = sp.playlist_tracks(
+            playlist_id,
+            market="from_token",
+            additional_types=("track", "episode")
+        )
     except Exception as e:
         if account_id:
-            add_log(account_id, f"sp.playlist() error: {e}")
+            add_log(account_id, f"playlist_tracks() error: {e}")
+        # Fallback: try sp.playlist() to get tracks
+        try:
+            if account_id:
+                add_log(account_id, "Trying fallback sp.playlist()...")
+            pl_data = sp.playlist(playlist_id, market="from_token")
+            for item in pl_data.get("tracks", {}).get("items", []):
+                track = item.get("track")
+                if track and track.get("uri"):
+                    tracks.append(track["uri"])
+            if account_id:
+                add_log(account_id, f"Fallback found {len(tracks)} tracks")
+            return tracks
+        except Exception as e2:
+            if account_id:
+                add_log(account_id, f"Fallback also failed: {e2}")
+            return tracks
+
+    page = 1
+    while results:
+        items = results.get("items", [])
+        null_count = 0
+
+        for item in items:
+            track = item.get("track")
+            if track and track.get("uri"):
+                tracks.append(track["uri"])
+            else:
+                null_count += 1
+                # Log raw keys for debugging
+                if account_id and null_count <= 3:
+                    item_keys = list(item.keys())
+                    has_episode = "episode" in item_keys
+                    track_val = item.get("track")
+                    add_log(account_id, f"Null item keys={item_keys}, episode={has_episode}, track_type={type(track_val).__name__}")
+
+        if account_id:
+            add_log(account_id, f"Page {page}: {len(items)} items, {null_count} null, {len(tracks)} valid")
+
+        if results.get("next"):
+            try:
+                results = sp.next(results)
+                page += 1
+            except Exception as e:
+                if account_id:
+                    add_log(account_id, f"Pagination error: {e}")
+                break
+        else:
+            break
+
+    # If still no tracks, try sp.playlist() as last resort
+    if not tracks:
+        try:
+            if account_id:
+                add_log(account_id, "No tracks from playlist_tracks, trying sp.playlist()...")
+            pl_data = sp.playlist(playlist_id, market="from_token")
+            total = pl_data.get("tracks", {}).get("total", 0)
+            if account_id:
+                add_log(account_id, f"sp.playlist() reports {total} total tracks")
+            for item in pl_data.get("tracks", {}).get("items", []):
+                track = item.get("track")
+                if track and track.get("uri"):
+                    tracks.append(track["uri"])
+        except Exception as e:
+            if account_id:
+                add_log(account_id, f"sp.playlist() fallback error: {e}")
 
     if account_id:
         add_log(account_id, f"Total tracks found: {len(tracks)}")
@@ -227,27 +251,20 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     return tracks
 
 
-def wait_for_device(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> str | None:
-    """Wait for an active Spotify device. Returns device_id or None."""
+def wait_for_device(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> bool:
+    """Wait for an active Spotify device, polling every 5 seconds."""
     elapsed = 0
     while elapsed < timeout:
         try:
             devices = sp.devices()
-            device_list = devices.get("devices", []) if devices else []
-            if device_list:
-                # Prefer the active device, otherwise pick the first one
-                active = next((d for d in device_list if d.get("is_active")), None)
-                chosen = active or device_list[0]
-                dev_name = chosen.get("name", "Unknown")
-                dev_id = chosen.get("id")
-                add_log(account_id, f"Found device: {dev_name}")
-                return dev_id
+            if devices and devices.get("devices"):
+                return True
         except Exception:
             pass
         add_log(account_id, f"Waiting for active device... ({elapsed}s)")
         time.sleep(5)
         elapsed += 5
-    return None
+    return False
 
 
 def run_bot(account_id: str):
@@ -274,16 +291,15 @@ def run_bot(account_id: str):
     add_log(account_id, "Bot starting...")
 
     # Wait for an active Spotify device
-    device_id = wait_for_device(sp, account_id)
-    if not device_id:
+    if not wait_for_device(sp, account_id):
         add_log(account_id, "No active Spotify device found — open Spotify on any device")
         set_status(account_id, "error")
         return
 
     # Disable shuffle and repeat
     try:
-        sp.shuffle(False, device_id=device_id)
-        sp.repeat("off", device_id=device_id)
+        sp.shuffle(False)
+        sp.repeat("off")
     except Exception as e:
         add_log(account_id, f"Could not set shuffle/repeat: {e}")
 
@@ -300,13 +316,6 @@ def run_bot(account_id: str):
         sp = get_spotify(load_account(account_id))
         if not sp:
             add_log(account_id, "Token expired — re-authorize")
-            set_status(account_id, "error")
-            return
-
-        # Re-find active device for each playlist
-        device_id = wait_for_device(sp, account_id)
-        if not device_id:
-            add_log(account_id, "No device found — open Spotify")
             set_status(account_id, "error")
             return
 
@@ -331,39 +340,16 @@ def run_bot(account_id: str):
         except Exception:
             pass  # Non-critical, continue even if follow fails
 
-        # Start playback on specific device with retry
-        playback_started = False
-        for attempt in range(3):
-            try:
-                sp.start_playback(context_uri=playlist_uri, device_id=device_id)
-                time.sleep(3)
-
-                # Verify playback actually started
-                pb = sp.current_playback()
-                if pb and pb.get("is_playing"):
-                    current = pb.get("item", {}).get("name", "Unknown") if pb.get("item") else "Unknown"
-                    add_log(account_id, f"Now playing: {current}")
-                    playback_started = True
-                    break
-                else:
-                    add_log(account_id, f"Playback not confirmed (attempt {attempt + 1}/3)")
-            except Exception as e:
-                add_log(account_id, f"Start attempt {attempt + 1} failed: {e}")
-                # Try refreshing device
-                device_id = wait_for_device(sp, account_id, timeout=10)
-                if not device_id:
-                    break
-
-        if not playback_started:
-            add_log(account_id, "Could not start playback after 3 attempts")
+        # Start playback
+        try:
+            sp.start_playback(context_uri=playlist_uri)
+            time.sleep(1)
+            sp.shuffle(False)
+            sp.repeat("off")
+        except Exception as e:
+            add_log(account_id, f"Failed to start playback: {e}")
             set_status(account_id, "error")
             return
-
-        try:
-            sp.shuffle(False, device_id=device_id)
-            sp.repeat("off", device_id=device_id)
-        except Exception:
-            pass
 
         set_status(account_id, "playing")
 
