@@ -170,64 +170,56 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
         add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
 
     def _extract_uri(item_obj):
-        """Extract track URI - Spotify uses 'track' or 'item' key depending on API version."""
-        track = item_obj.get("track") or item_obj.get("item")
-        if track and isinstance(track, dict) and track.get("uri"):
-            return track["uri"]
+        """Extract track URI - handles both 'track' and 'item' keys."""
+        for key in ("track", "item"):
+            obj = item_obj.get(key)
+            if obj and isinstance(obj, dict):
+                uri = obj.get("uri")
+                if uri and uri.startswith("spotify:track:"):
+                    return uri
         return None
 
-    # Primary: try sp.playlist_items() (newer endpoint, no 403 issues)
-    results = None
+    # Use sp.playlist() as primary — other endpoints return 403
     try:
-        results = sp.playlist_items(playlist_id, additional_types=["track"])
-    except Exception:
-        pass
+        pl_data = sp.playlist(playlist_id)
+        tracks_data = pl_data.get("tracks", {})
+        total = tracks_data.get("total", 0)
 
-    # Fallback to playlist_tracks without additional_types
-    if results is None:
-        try:
-            results = sp._get(f"playlists/{playlist_id}/tracks", limit=50, offset=0)
-        except Exception as e:
-            if account_id:
-                add_log(account_id, f"Track fetch error: {e}")
-            results = None
+        if account_id:
+            add_log(account_id, f"Playlist has {total} tracks (reported by Spotify)")
 
-    if results:
+        # Log first item structure for debugging
+        first_items = tracks_data.get("items", [])
+        if account_id and first_items:
+            add_log(account_id, f"First item keys: {list(first_items[0].keys())}")
+
+        # Extract from first page
+        for item in first_items:
+            uri = _extract_uri(item)
+            if uri:
+                tracks.append(uri)
+
+        # Paginate if more tracks exist
         page = 1
-        while results:
-            items = results.get("items", [])
-            for item in items:
-                uri = _extract_uri(item)
-                if uri:
-                    tracks.append(uri)
-
-            if account_id:
-                add_log(account_id, f"Page {page}: {len(items)} items, {len(tracks)} tracks so far")
-
-            if results.get("next"):
-                try:
-                    results = sp.next(results)
-                    page += 1
-                except Exception:
+        while tracks_data.get("next"):
+            page += 1
+            try:
+                tracks_data = sp.next(tracks_data)
+                if not tracks_data:
                     break
-            else:
+                for item in tracks_data.get("items", []):
+                    uri = _extract_uri(item)
+                    if uri:
+                        tracks.append(uri)
+            except Exception:
                 break
 
-    # Fallback: sp.playlist() if no tracks found
-    if not tracks:
-        try:
-            if account_id:
-                add_log(account_id, "Trying sp.playlist() fallback...")
-            pl_data = sp.playlist(playlist_id)
-            for item in pl_data.get("tracks", {}).get("items", []):
-                uri = _extract_uri(item)
-                if uri:
-                    tracks.append(uri)
-            if account_id:
-                add_log(account_id, f"Fallback found {len(tracks)} tracks")
-        except Exception as e:
-            if account_id:
-                add_log(account_id, f"Fallback error: {e}")
+        if account_id:
+            add_log(account_id, f"Extracted {len(tracks)} URIs from {page} page(s)")
+
+    except Exception as e:
+        if account_id:
+            add_log(account_id, f"sp.playlist() error: {e}")
 
     if account_id:
         add_log(account_id, f"Total tracks found: {len(tracks)}")
