@@ -334,9 +334,12 @@ def run_bot(account_id: str):
         last_track_seen = False
         pause_count = 0
         none_count = 0
+        unknown_count = 0
+        poll_num = 0
 
         while not stop_flag.is_set():
             time.sleep(5)
+            poll_num += 1
 
             # Re-get spotify client to handle token refresh
             acc_fresh = load_account(account_id)
@@ -369,39 +372,54 @@ def run_bot(account_id: str):
                 none_count = 0
 
             current_track_uri = None
+            current_track_name = "?"
             if pb.get("item"):
                 current_track_uri = pb["item"].get("uri")
+                current_track_name = pb["item"].get("name", "?")
 
             is_playing = pb.get("is_playing", False)
+            progress = pb.get("progress_ms", 0)
             context = pb.get("context")
             context_uri = context.get("uri") if context else None
+
+            # Log status every ~30 seconds (6 polls)
+            if poll_num % 6 == 0:
+                add_log(account_id, f"♪ {current_track_name[:30]} | {'▶' if is_playing else '⏸'} | last_seen={last_track_seen}")
 
             # Case 1: Context changed (Spotify autoplay kicked in)
             if context_uri and context_uri != playlist_uri:
                 add_log(account_id, "Context changed (autoplay detected), advancing")
                 break
 
-            # Case 1b: Unknown track playing (not in playlist = autoplay injected)
-            if track_set and current_track_uri and current_track_uri not in track_set and last_track_seen:
-                add_log(account_id, "Unknown track detected (autoplay), advancing")
-                break
+            # Case 1b: Unknown track (not in playlist = autoplay injected)
+            if track_set and current_track_uri and current_track_uri not in track_set:
+                unknown_count += 1
+                if unknown_count >= 2:
+                    add_log(account_id, f"Unknown track detected: {current_track_name[:30]}, advancing")
+                    break
+            else:
+                unknown_count = 0
 
             # Track if we've seen the last track
             if last_track_uri and current_track_uri == last_track_uri:
+                if not last_track_seen:
+                    add_log(account_id, "Last track reached")
                 last_track_seen = True
 
             # Case 2: Looped back to track 1 after last track was seen
             if last_track_seen and first_track_uri and current_track_uri == first_track_uri:
-                progress = pb.get("progress_ms", 0)
                 if progress < 5000:
                     add_log(account_id, "Playlist looped to start, advancing")
                     break
 
             # Case 3: Paused after last track was seen
-            if last_track_seen and not is_playing:
+            if not is_playing:
                 pause_count += 1
-                if pause_count >= 2:
+                if last_track_seen and pause_count >= 2:
                     add_log(account_id, "Playback paused after last track, advancing")
+                    break
+                if pause_count >= 6:
+                    add_log(account_id, "Playback paused for 30s, advancing")
                     break
             else:
                 pause_count = 0
