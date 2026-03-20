@@ -334,13 +334,42 @@ def run_bot(account_id: str):
         # Start playback on the target device
         try:
             sp.start_playback(context_uri=playlist_uri, device_id=device_id)
-            time.sleep(1)
+            time.sleep(2)
             sp.shuffle(False, device_id=device_id)
             sp.repeat("off", device_id=device_id)
         except Exception as e:
             add_log(account_id, f"Failed to start playback: {e}")
             set_status(account_id, "error")
             return
+
+        # If track list is empty, extract from player queue (bypasses playlist restrictions)
+        if not tracks:
+            try:
+                q_resp = requests.get(
+                    "https://api.spotify.com/v1/me/player/queue",
+                    headers={"Authorization": f"Bearer {sp._auth}"},
+                    timeout=10
+                )
+                if q_resp.status_code == 200:
+                    q_data = q_resp.json()
+                    current = q_data.get("currently_playing")
+                    queue_items = q_data.get("queue", [])
+                    if current and current.get("uri"):
+                        tracks = [current["uri"]]
+                    for qi in queue_items:
+                        uri = qi.get("uri")
+                        if uri and uri not in tracks:
+                            tracks.append(uri)
+                    if tracks:
+                        total_count = len(tracks)
+                        last_track_uri = tracks[-1]
+                        first_track_uri = tracks[0]
+                        track_set = set(tracks)
+                        add_log(account_id, f"Extracted {total_count} tracks from player queue")
+                    else:
+                        add_log(account_id, "Queue empty — using fallback detection")
+            except Exception as e:
+                add_log(account_id, f"Queue read failed: {e}")
 
         set_status(account_id, "playing")
 
