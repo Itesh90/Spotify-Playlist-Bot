@@ -216,20 +216,26 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     return tracks
 
 
-def wait_for_device(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> bool:
-    """Wait for an active Spotify device, polling every 5 seconds."""
+def get_device_id(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> str | None:
+    """Wait for a Spotify device and return its ID."""
     elapsed = 0
     while elapsed < timeout:
         try:
-            devices = sp.devices()
-            if devices and devices.get("devices"):
-                return True
-        except Exception:
-            pass
-        add_log(account_id, f"Waiting for active device... ({elapsed}s)")
+            result = sp.devices()
+            device_list = result.get("devices", []) if result else []
+            for d in device_list:
+                if not d.get("is_restricted", False):
+                    add_log(account_id, f"Found device: {d.get('name')} ({d.get('type')})")
+                    return d["id"]
+            if device_list:
+                names = [d.get('name', '?') for d in device_list]
+                add_log(account_id, f"Devices found but restricted: {names}")
+        except Exception as e:
+            add_log(account_id, f"Device check error: {e}")
+        add_log(account_id, f"Waiting for Spotify device... ({elapsed}s)")
         time.sleep(5)
         elapsed += 5
-    return False
+    return None
 
 
 def run_bot(account_id: str):
@@ -255,16 +261,17 @@ def run_bot(account_id: str):
     set_status(account_id, "starting")
     add_log(account_id, "Bot starting...")
 
-    # Wait for an active Spotify device
-    if not wait_for_device(sp, account_id):
-        add_log(account_id, "No active Spotify device found — open Spotify on any device")
+    # Find a Spotify device to play on
+    device_id = get_device_id(sp, account_id)
+    if not device_id:
+        add_log(account_id, "No Spotify device found — open Spotify on your phone, PC or go to open.spotify.com")
         set_status(account_id, "error")
         return
 
     # Disable shuffle and repeat
     try:
-        sp.shuffle(False)
-        sp.repeat("off")
+        sp.shuffle(False, device_id=device_id)
+        sp.repeat("off", device_id=device_id)
     except Exception as e:
         add_log(account_id, f"Could not set shuffle/repeat: {e}")
 
@@ -303,19 +310,19 @@ def run_bot(account_id: str):
         try:
             requests.put(
                 "https://api.spotify.com/v1/me/library",
-                headers={"Authorization": f"Bearer {sp.auth}"},
+                headers={"Authorization": f"Bearer {sp._auth}"},
                 json={"uris": [playlist_uri]},
                 timeout=10
             )
         except Exception:
             pass  # Non-critical, continue even if follow fails
 
-        # Start playback
+        # Start playback on the target device
         try:
-            sp.start_playback(context_uri=playlist_uri)
+            sp.start_playback(context_uri=playlist_uri, device_id=device_id)
             time.sleep(1)
-            sp.shuffle(False)
-            sp.repeat("off")
+            sp.shuffle(False, device_id=device_id)
+            sp.repeat("off", device_id=device_id)
         except Exception as e:
             add_log(account_id, f"Failed to start playback: {e}")
             set_status(account_id, "error")
