@@ -1,4 +1,5 @@
 import os
+import requests
 import re
 import json
 import time
@@ -21,7 +22,7 @@ os.makedirs(TOKENS_DIR, exist_ok=True)
 
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000")
 REDIRECT_URI = f"{BASE_URL}/callback"
-SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-modify-public user-read-currently-playing"
+SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public user-read-currently-playing"
 
 bot_threads: dict[str, threading.Thread] = {}
 bot_stop_flags: dict[str, threading.Event] = {}
@@ -172,9 +173,18 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     offset = 0
     limit = 100
 
+    headers = {"Authorization": f"Bearer {sp.auth}"}
+
     while True:
         try:
-            results = sp._get(f"playlists/{playlist_id}/tracks", limit=limit, offset=offset)
+            resp = requests.get(
+                f"https://api.spotify.com/v1/playlists/{playlist_id}/items",
+                headers=headers,
+                params={"limit": limit, "offset": offset},
+                timeout=10
+            )
+            resp.raise_for_status()
+            results = resp.json()
         except Exception as e:
             if account_id:
                 add_log(account_id, f"Track fetch error: {e}")
@@ -289,9 +299,14 @@ def run_bot(account_id: str):
         first_track_uri = tracks[0] if tracks else None
         track_set = set(tracks) if tracks else set()
 
-        # Auto-follow playlist if not already saved
+        # Auto-follow playlist (using new generic library endpoint)
         try:
-            sp.current_user_follow_playlist(playlist_id)
+            requests.put(
+                "https://api.spotify.com/v1/me/library",
+                headers={"Authorization": f"Bearer {sp.auth}"},
+                json={"uris": [playlist_uri]},
+                timeout=10
+            )
         except Exception:
             pass  # Non-critical, continue even if follow fails
 
@@ -596,7 +611,7 @@ def auth_callback():
 
     oauth = get_oauth(acc)
     try:
-        oauth.get_access_token(code, as_dict=True)
+        oauth.get_access_token(code)
     except Exception as e:
         return f"Auth failed: {e}", 500
 
