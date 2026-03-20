@@ -173,7 +173,7 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     offset = 0
     limit = 100
 
-    headers = {"Authorization": f"Bearer {sp.auth}"}
+    headers = {"Authorization": f"Bearer {sp._auth}"}
 
     while True:
         try:
