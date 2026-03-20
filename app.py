@@ -169,42 +169,34 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
     if account_id:
         add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
 
-    try:
-        playlist_data = sp.playlist(playlist_id)
-        results = playlist_data.get("tracks", {})
-    except Exception as e:
-        if account_id:
-            add_log(account_id, f"playlist fetch error: {e}")
-        return tracks
+    offset = 0
+    limit = 100
 
-    page = 1
-    while results:
-        items = results.get("items", [])
-        null_count = 0
+    while True:
+        try:
+            results = sp._get(f"playlists/{playlist_id}/tracks", limit=limit, offset=offset)
+        except Exception as e:
+            if account_id:
+                add_log(account_id, f"Track fetch error: {e}")
+            break
+
+        items = results.get("items", []) if isinstance(results, dict) else []
+
+        if not items:
+            break
 
         for item in items:
-            # Spotify sometimes uses "item" key instead of "track"
             track = item.get("track") or item.get("item")
-            if track and track.get("uri") and track.get("type") == "track":
+            if track and track.get("uri"):
                 tracks.append(track["uri"])
-            else:
-                null_count += 1
-                if account_id and null_count <= 2:
-                    t = item.get("track") or item.get("item")
-                    t_type = t.get("type") if t else None
-                    add_log(account_id, f"Skipped item type={t_type}")
 
         if account_id:
-            add_log(account_id, f"Page {page}: {len(items)} items, {null_count} skipped, {len(tracks)} valid")
+            add_log(account_id, f"Fetched {len(items)} items (offset {offset}), {len(tracks)} tracks total")
 
-        if results.get("next"):
-            try:
-                results = sp.next(results)
-                page += 1
-            except Exception as e:
-                if account_id:
-                    add_log(account_id, f"Pagination error: {e}")
-                break
+        # Check for next page
+        next_url = results.get("next") if isinstance(results, dict) else None
+        if next_url:
+            offset += limit
         else:
             break
 
