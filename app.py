@@ -189,12 +189,17 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
         except Exception as e:
             if account_id:
                 add_log(account_id, f"Track list restricted, using count-based detection")
-            # Fallback: get just the track count from playlist metadata
+            # Fallback: get track count from playlist metadata (no fields filter)
             try:
-                info = sp.playlist(playlist_id, fields="tracks.total")
-                total_count = info.get("tracks", {}).get("total", 0)
-                if account_id:
-                    add_log(account_id, f"Playlist has {total_count} tracks (from metadata)")
+                meta_resp = requests.get(
+                    f"https://api.spotify.com/v1/playlists/{playlist_id}",
+                    headers=headers, timeout=10
+                )
+                if meta_resp.status_code == 200:
+                    meta = meta_resp.json()
+                    total_count = meta.get("tracks", {}).get("total", 0)
+                    if account_id:
+                        add_log(account_id, f"Playlist has {total_count} tracks (from metadata)")
             except Exception:
                 pass
             break
@@ -346,9 +351,11 @@ def run_bot(account_id: str):
         unknown_count = 0
         poll_num = 0
         seen_track_uris = set()
+        prev_track_uri = None
+        auth_header = {"Authorization": f"Bearer {sp._auth}"}
 
         while not stop_flag.is_set():
-            time.sleep(3)
+            time.sleep(2)
             poll_num += 1
 
             # Re-get spotify client to handle token refresh
@@ -360,6 +367,7 @@ def run_bot(account_id: str):
                 add_log(account_id, "Token lost during playback — re-authorize")
                 set_status(account_id, "error")
                 return
+            auth_header = {"Authorization": f"Bearer {sp._auth}"}
 
             try:
                 pb = sp.current_playback()
@@ -383,9 +391,11 @@ def run_bot(account_id: str):
 
             current_track_uri = None
             current_track_name = "?"
+            duration = 0
             if pb.get("item"):
                 current_track_uri = pb["item"].get("uri")
                 current_track_name = pb["item"].get("name", "?")
+                duration = pb["item"].get("duration_ms", 0)
 
             is_playing = pb.get("is_playing", False)
             progress = pb.get("progress_ms", 0)
@@ -396,8 +406,28 @@ def run_bot(account_id: str):
             if current_track_uri:
                 seen_track_uris.add(current_track_uri)
 
-            # Log status every ~30 seconds (10 polls at 3s)
-            if poll_num % 10 == 0:
+            # Detect track change — check queue on transition
+            track_changed = (current_track_uri and current_track_uri != prev_track_uri and prev_track_uri is not None)
+            prev_track_uri = current_track_uri
+
+            if track_changed:
+                add_log(account_id, f"Now playing: {current_track_name[:35]} ({len(seen_track_uris)}/{total_count})")
+                # Check queue for autoplay
+                try:
+                    q_resp = requests.get("https://api.spotify.com/v1/me/player/queue", headers=auth_header, timeout=5)
+                    if q_resp.status_code == 200:
+                        q_data = q_resp.json()
+                        queue_items = q_data.get("queue", [])
+                        if queue_items and track_set:
+                            next_uri = queue_items[0].get("uri", "")
+                            if next_uri not in track_set:
+                                add_log(account_id, "Next queued song is not in playlist — advancing")
+                                break
+                except Exception:
+                    pass
+
+            # Log status every ~30 seconds (15 polls at 2s)
+            if poll_num % 15 == 0:
                 add_log(account_id, f"♪ {current_track_name[:30]} | {'▶' if is_playing else '⏸'} | seen={len(seen_track_uris)}/{total_count}")
 
             # Case 1: Context changed (Spotify autoplay kicked in)
