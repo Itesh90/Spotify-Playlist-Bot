@@ -163,16 +163,17 @@ def get_spotify(account: dict) -> spotipy.Spotify | None:
 
 # ─── Bot Engine ──────────────────────────────────────────────────────────────────────
 
-def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str = None) -> list[str]:
+def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str = None) -> tuple[list[str], int]:
+    """Returns (track_uris, total_count). total_count may be > 0 even if track_uris is empty."""
     playlist_id = playlist_uri.split(":")[-1]
     tracks = []
+    total_count = 0
 
     if account_id:
         add_log(account_id, f"Fetching tracks for ID: {playlist_id}")
 
     offset = 0
     limit = 100
-
     headers = {"Authorization": f"Bearer {sp._auth}"}
 
     while True:
@@ -187,11 +188,18 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
             results = resp.json()
         except Exception as e:
             if account_id:
-                add_log(account_id, f"Track fetch error: {e}")
+                add_log(account_id, f"Track list restricted, using count-based detection")
+            # Fallback: get just the track count from playlist metadata
+            try:
+                info = sp.playlist(playlist_id, fields="tracks.total")
+                total_count = info.get("tracks", {}).get("total", 0)
+                if account_id:
+                    add_log(account_id, f"Playlist has {total_count} tracks (from metadata)")
+            except Exception:
+                pass
             break
 
         items = results.get("items", []) if isinstance(results, dict) else []
-
         if not items:
             break
 
@@ -203,17 +211,17 @@ def get_playlist_tracks(sp: spotipy.Spotify, playlist_uri: str, account_id: str 
         if account_id:
             add_log(account_id, f"Fetched {len(items)} items (offset {offset}), {len(tracks)} tracks total")
 
-        # Check for next page
         next_url = results.get("next") if isinstance(results, dict) else None
         if next_url:
             offset += limit
         else:
             break
 
+    total_count = max(total_count, len(tracks))
     if account_id:
-        add_log(account_id, f"Total tracks found: {len(tracks)}")
+        add_log(account_id, f"Total tracks found: {len(tracks)}, playlist size: {total_count}")
 
-    return tracks
+    return tracks, total_count
 
 
 def get_device_id(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> str | None:
@@ -293,13 +301,14 @@ def run_bot(account_id: str):
 
         # Get playlist track list for end detection
         try:
-            tracks = get_playlist_tracks(sp, playlist_uri, account_id)
+            tracks, total_count = get_playlist_tracks(sp, playlist_uri, account_id)
         except Exception as e:
             add_log(account_id, f"Failed to fetch tracks: {e}")
-            set_status(account_id, "error")
-            return
+            tracks, total_count = [], 0
 
-        if not tracks:
+        if not tracks and total_count > 0:
+            add_log(account_id, f"Track list restricted — using count-based detection ({total_count} tracks)")
+        elif not tracks:
             add_log(account_id, f"Could not read track list — will play anyway with fallback detection")
 
         last_track_uri = tracks[-1] if tracks else None
@@ -336,9 +345,10 @@ def run_bot(account_id: str):
         none_count = 0
         unknown_count = 0
         poll_num = 0
+        seen_track_uris = set()
 
         while not stop_flag.is_set():
-            time.sleep(5)
+            time.sleep(3)
             poll_num += 1
 
             # Re-get spotify client to handle token refresh
@@ -382,13 +392,22 @@ def run_bot(account_id: str):
             context = pb.get("context")
             context_uri = context.get("uri") if context else None
 
-            # Log status every ~30 seconds (6 polls)
-            if poll_num % 6 == 0:
-                add_log(account_id, f"♪ {current_track_name[:30]} | {'▶' if is_playing else '⏸'} | last_seen={last_track_seen}")
+            # Track unique songs seen
+            if current_track_uri:
+                seen_track_uris.add(current_track_uri)
+
+            # Log status every ~30 seconds (10 polls at 3s)
+            if poll_num % 10 == 0:
+                add_log(account_id, f"♪ {current_track_name[:30]} | {'▶' if is_playing else '⏸'} | seen={len(seen_track_uris)}/{total_count}")
 
             # Case 1: Context changed (Spotify autoplay kicked in)
             if context_uri and context_uri != playlist_uri:
                 add_log(account_id, "Context changed (autoplay detected), advancing")
+                break
+
+            # Case 1c: Context gone (null context = autoplay radio)
+            if context is None and is_playing and len(seen_track_uris) > 1:
+                add_log(account_id, "Context lost (autoplay radio), advancing")
                 break
 
             # Case 1b: Unknown track (not in playlist = autoplay injected)
@@ -399,6 +418,11 @@ def run_bot(account_id: str):
                     break
             else:
                 unknown_count = 0
+
+            # Case 1d: Seen more unique tracks than playlist has (fallback count detection)
+            if total_count > 0 and not track_set and len(seen_track_uris) > total_count:
+                add_log(account_id, f"Seen {len(seen_track_uris)} tracks but playlist has {total_count} — autoplay detected, advancing")
+                break
 
             # Track if we've seen the last track
             if last_track_uri and current_track_uri == last_track_uri:
