@@ -3,21 +3,30 @@ import requests
 import re
 import json
 import time
+import random
 import uuid
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from flask import Flask, request, jsonify, redirect, render_template, session
+from flask import Flask, request, jsonify, redirect, session
+from flask_cors import CORS
+from functools import wraps
+from werkzeug.security import generate_password_hash, check_password_hash
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 # ─── App Setup ────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "spotify-bot-secret-key-change-me")
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
+app.config["SESSION_PERMANENT"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
+CORS(app, supports_credentials=True, origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")])
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 TOKENS_DIR = os.path.join(DATA_DIR, "tokens")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 os.makedirs(TOKENS_DIR, exist_ok=True)
 
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000")
@@ -98,12 +107,37 @@ def add_log(account_id: str, message: str):
         if not acc:
             return
         entry = {"time": datetime.now().strftime("%H:%M:%S"), "msg": message}
-        acc["log"].append(entry)
-        acc["log"] = acc["log"][-20:]
+        acc.setdefault("log", []).insert(0, entry)
+        acc["log"] = acc["log"][:100]  # keep last 100
         save_account(account_id, acc)
     finally:
         if lock:
             lock.release()
+
+# ─── User Authentication ─────────────────────────────────────────────────────
+
+def load_users() -> dict:
+    if not os.path.exists(USERS_FILE):
+        return {}
+    with open(USERS_FILE, "r") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+def save_users(users: dict):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f, indent=2)
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "Not authenticated"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+# ─── Core Logic ───────────────────────────────────────────────────────────────
 
 
 def set_status(account_id: str, status: str):
@@ -244,6 +278,10 @@ def get_device_id(sp: spotipy.Spotify, account_id: str, timeout: int = 30) -> st
                 names = [d.get('name', '?') for d in device_list]
                 add_log(account_id, f"Devices found but restricted: {names}")
         except Exception as e:
+            err = str(e)
+            if "not registered" in err.lower():
+                add_log(account_id, "Account not registered — add this email in Developer Dashboard → User Management")
+                return None
             add_log(account_id, f"Device check error: {e}")
         add_log(account_id, f"Waiting for Spotify device... ({elapsed}s)")
         time.sleep(5)
@@ -320,27 +358,50 @@ def run_bot(account_id: str):
         first_track_uri = tracks[0] if tracks else None
         track_set = set(tracks) if tracks else set()
 
-        # Auto-follow playlist (using new generic library endpoint)
+        # Auto-follow playlist
         try:
             requests.put(
-                "https://api.spotify.com/v1/me/library",
+                f"https://api.spotify.com/v1/playlists/{playlist_id}/followers",
                 headers={"Authorization": f"Bearer {sp._auth}"},
-                json={"uris": [playlist_uri]},
+                json={"public": False},
                 timeout=10
             )
         except Exception:
-            pass  # Non-critical, continue even if follow fails
+            pass  # Non-critical
 
-        # Start playback on the target device
-        try:
-            sp.start_playback(context_uri=playlist_uri, device_id=device_id)
-            time.sleep(2)
-            sp.shuffle(False, device_id=device_id)
-            sp.repeat("off", device_id=device_id)
-        except Exception as e:
-            add_log(account_id, f"Failed to start playback: {e}")
-            set_status(account_id, "error")
-            return
+        # Re-detect device (may have gone idle during delay)
+        device_id = get_device_id(sp, account_id, timeout=30)
+        if not device_id:
+            add_log(account_id, "No device found before playback — skipping playlist")
+            current_index += 1
+            _save_index(account_id, current_index)
+            continue
+
+        # Start playback with retry
+        started = False
+        for attempt in range(3):
+            try:
+                sp.start_playback(context_uri=playlist_uri, device_id=device_id)
+                time.sleep(2)
+                try:
+                    sp.shuffle(False, device_id=device_id)
+                    sp.repeat("off", device_id=device_id)
+                except Exception:
+                    pass
+                started = True
+                break
+            except Exception as e:
+                add_log(account_id, f"Playback start attempt {attempt+1}/3 failed: {e}")
+                if attempt < 2:
+                    time.sleep(3)
+                    # Re-detect device on retry
+                    device_id = get_device_id(sp, account_id, timeout=15) or device_id
+
+        if not started:
+            add_log(account_id, "Failed to start playback after 3 attempts — skipping playlist")
+            current_index += 1
+            _save_index(account_id, current_index)
+            continue
 
         # If track list is empty, extract from player queue (bypasses playlist restrictions)
         if not tracks:
@@ -448,9 +509,11 @@ def run_bot(account_id: str):
                         q_data = q_resp.json()
                         queue_items = q_data.get("queue", [])
                         if queue_items and track_set:
+                            # Only advance if current track is ALSO not in playlist (autoplay already playing)
+                            current_in_playlist = current_track_uri in track_set
                             next_uri = queue_items[0].get("uri", "")
-                            if next_uri not in track_set:
-                                add_log(account_id, "Next queued song is not in playlist — advancing")
+                            if not current_in_playlist and next_uri not in track_set:
+                                add_log(account_id, "Autoplay active — advancing")
                                 break
                 except Exception:
                     pass
@@ -506,6 +569,14 @@ def run_bot(account_id: str):
                     break
             else:
                 pause_count = 0
+
+        # Humanized delay before next playlist (10-30s random)
+        delay = random.randint(10, 30)
+        add_log(account_id, f"Waiting {delay}s before next playlist...")
+        for _ in range(delay):
+            if stop_flag.is_set():
+                break
+            time.sleep(1)
 
         # Advance to next playlist
         current_index += 1
@@ -581,14 +652,41 @@ def stop_bot(account_id: str) -> str | None:
     return None
 
 
-# ─── API Routes ───────────────────────────────────────────────────────────────
+# ─── API Routes & Auth ───────────────────────────────────────────────────────────────
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.json or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    users = load_users()
+    
+    # Auto-create admin if no users exist
+    if not users:
+        users["admin"] = {"password": generate_password_hash("admin")}
+        save_users(users)
+        
+    if username in users and check_password_hash(users[username]["password"], password):
+        session.permanent = True
+        session["user_id"] = username
+        return jsonify({"ok": True, "user": username})
+    return jsonify({"error": "Invalid username or password"}), 401
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.pop("user_id", None)
+    return jsonify({"ok": True})
+
+@app.route("/api/me", methods=["GET"])
+def api_me():
+    user = session.get("user_id")
+    if user:
+        return jsonify({"user": user})
+    return jsonify({"user": None}), 401
 
 
 @app.route("/api/accounts", methods=["GET"])
+@login_required
 def api_list_accounts():
     accounts = load_all_accounts()
     safe = []
@@ -611,7 +709,8 @@ def account_id_running(account_id: str) -> bool:
     return account_id in bot_threads and bot_threads[account_id].is_alive()
 
 
-@app.route("/api/accounts", methods=["POST"])
+@app.route("/api/add_account", methods=["POST"])
+@login_required
 def api_add_account():
     data = request.json
     if not data:
@@ -625,14 +724,16 @@ def api_add_account():
     return jsonify(acc), 201
 
 
-@app.route("/api/accounts/<account_id>", methods=["DELETE"])
+@app.route("/api/delete_account/<account_id>", methods=["DELETE"])
+@login_required
 def api_delete_account(account_id):
     stop_bot(account_id)
     delete_account_files(account_id)
     return jsonify({"ok": True})
 
 
-@app.route("/api/accounts/<account_id>/playlists", methods=["POST"])
+@app.route("/api/add_playlist/<account_id>", methods=["POST"])
+@login_required
 def api_add_playlist(account_id):
     acc = load_account(account_id)
     if not acc:
@@ -649,7 +750,8 @@ def api_add_playlist(account_id):
     return jsonify({"ok": True, "playlists": acc["playlists"]})
 
 
-@app.route("/api/accounts/<account_id>/playlists/<int:playlist_index>", methods=["DELETE"])
+@app.route("/api/remove_playlist/<account_id>/<int:playlist_index>", methods=["DELETE"])
+@login_required
 def api_remove_playlist(account_id, playlist_index):
     acc = load_account(account_id)
     if not acc:
@@ -661,7 +763,8 @@ def api_remove_playlist(account_id, playlist_index):
     return jsonify({"ok": True, "playlists": acc["playlists"]})
 
 
-@app.route("/api/accounts/<account_id>/start", methods=["POST"])
+@app.route("/api/start/<account_id>", methods=["POST"])
+@login_required
 def api_start_bot(account_id):
     err = start_bot(account_id)
     if err:
@@ -669,23 +772,30 @@ def api_start_bot(account_id):
     return jsonify({"ok": True})
 
 
-@app.route("/api/accounts/<account_id>/stop", methods=["POST"])
+@app.route("/api/stop/<account_id>", methods=["POST"])
+@login_required
 def api_stop_bot(account_id):
     stop_bot(account_id)
     return jsonify({"ok": True})
 
 
 @app.route("/api/start-all", methods=["POST"])
+@login_required
 def api_start_all():
     accounts = load_all_accounts()
     results = {}
-    for acc in accounts:
+    for i, acc in enumerate(accounts):
+        if i > 0:
+            delay = random.randint(15, 45)
+            add_log(acc["id"], f"Staggered start: waiting {delay}s before this account...")
+            time.sleep(delay)
         err = start_bot(acc["id"])
         results[acc["id"]] = err or "started"
     return jsonify(results)
 
 
 @app.route("/api/stop-all", methods=["POST"])
+@login_required
 def api_stop_all():
     accounts = load_all_accounts()
     for acc in accounts:
@@ -695,7 +805,8 @@ def api_stop_all():
 
 # ─── OAuth Routes ─────────────────────────────────────────────────────────────
 
-@app.route("/auth/<account_id>")
+@app.route("/authorize/<account_id>")
+@login_required
 def auth_login(account_id):
     acc = load_account(account_id)
     if not acc:
@@ -726,7 +837,7 @@ def auth_callback():
     acc["authorized"] = True
     save_account(account_id, acc)
     add_log(account_id, "Authorization successful")
-    return redirect("/")
+    return redirect(FRONTEND_URL)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

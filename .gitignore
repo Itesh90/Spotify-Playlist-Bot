@@ -27,3 +27,8 @@ desktop.ini
 
 # Misc
 *.log
+
+# Environment variables
+.env
+.env.*
+!.env.example

@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-outfit), ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --color-brand-cyan: #00f2fe;
+  --color-brand-blue: #4facfe;
+  --color-brand-purple: #8a2be2;
+  --color-brand-pink: #ff007f;
+}
+
+:root {
+  --bg-dark: #0f0c29;
+  --bg-mid: #302b63;
+  --bg-light: #24243e;
+}
+
+body {
+  background: linear-gradient(135deg, var(--bg-dark) 0%, var(--bg-mid) 50%, var(--bg-light) 100%);
+  background-attachment: fixed;
+  color: #ffffff;
+  min-height: 100vh;
+  line-height: 1.5;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Animated background blobs */
+body::before, body::after {
+  content: "";
+  position: fixed;
+  width: 60vw;
+  height: 60vw;
+  max-width: 600px;
+  max-height: 600px;
+  border-radius: 50%;
+  filter: blur(150px);
+  z-index: -1;
+  animation: float 15s infinite alternate ease-in-out;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+body::before {
+  background: rgba(0, 242, 254, 0.2);
+  top: -20%;
+  left: -20%;
+}
+
+body::after {
+  background: rgba(138, 43, 226, 0.2);
+  bottom: -20%;
+  right: -20%;
+  animation-delay: -7s;
+}
+
+@keyframes float {
+  0% { transform: translateY(0) scale(1); }
+  100% { transform: translateY(50px) scale(1.1); }
+}
+
+/* Utility classes for glassmorphism */
+@layer utilities {
+  .glass-panel {
+    @apply bg-white/5 backdrop-blur-xl border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.2)];
+  }
+  
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-brand-cyan to-brand-blue;
+  }
+}
