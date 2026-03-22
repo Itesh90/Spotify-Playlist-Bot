@@ -37,7 +37,7 @@ BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000").rstrip("/")
 if BASE_URL and not BASE_URL.startswith("http"):
     BASE_URL = f"https://{BASE_URL}"
 REDIRECT_URI = f"{BASE_URL}/callback"
-SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public user-read-currently-playing"
+SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-library-modify user-read-currently-playing"
 
 bot_threads: dict[str, threading.Thread] = {}
 bot_stop_flags: dict[str, threading.Event] = {}
@@ -191,15 +191,18 @@ def _auto_save_playlist(account_id: str, playlist_uri: str, sp=None):
         # Also follow/save the playlist on the actual Spotify account
         if sp:
             try:
-                requests.put(
+                resp = requests.put(
                     f"https://api.spotify.com/v1/playlists/{playlist_id}/followers",
                     headers={"Authorization": f"Bearer {sp._auth}"},
                     json={"public": False},
                     timeout=10
                 )
-                add_log(account_id, f"Followed playlist on Spotify: {playlist_id}")
-            except Exception:
-                pass  # Non-critical
+                if resp.status_code in (200, 201):
+                    add_log(account_id, f"Followed playlist on Spotify: {playlist_id}")
+                else:
+                    add_log(account_id, f"Failed to follow playlist {playlist_id}: HTTP {resp.status_code}")
+            except Exception as e:
+                add_log(account_id, f"Follow request failed for {playlist_id}: {e}")
 
 
 # ─── Spotify Auth Helpers ─────────────────────────────────────────────────────
@@ -393,14 +396,18 @@ def run_bot(account_id: str):
 
         # Auto-follow playlist
         try:
-            requests.put(
+            follow_resp = requests.put(
                 f"https://api.spotify.com/v1/playlists/{playlist_id}/followers",
                 headers={"Authorization": f"Bearer {sp._auth}"},
                 json={"public": False},
                 timeout=10
             )
-        except Exception:
-            pass  # Non-critical
+            if follow_resp.status_code in (200, 201):
+                add_log(account_id, f"Auto-followed playlist: {playlist_id}")
+            else:
+                add_log(account_id, f"Failed to follow playlist {playlist_id}: HTTP {follow_resp.status_code}")
+        except Exception as e:
+            add_log(account_id, f"Follow request failed for {playlist_id}: {e}")
 
         # Re-detect device (may have gone idle during delay)
         device_id = get_device_id(sp, account_id, timeout=30)
