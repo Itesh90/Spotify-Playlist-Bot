@@ -175,6 +175,25 @@ def normalize_playlist_uri(uri_or_url: str) -> str | None:
     return None
 
 
+def extract_all_playlist_uris(text: str) -> list[str]:
+    """Extract every Spotify playlist URI/URL from a block of text (e.g. bulk paste)."""
+    found = []
+    seen = set()
+    # Match full URLs: https://open.spotify.com/playlist/ID
+    for pid in re.findall(r"https?://open\.spotify\.com/playlist/([a-zA-Z0-9]+)", text):
+        uri = f"spotify:playlist:{pid}"
+        if uri not in seen:
+            seen.add(uri)
+            found.append(uri)
+    # Match raw URIs: spotify:playlist:ID
+    for pid in re.findall(r"spotify:playlist:([a-zA-Z0-9]+)", text):
+        uri = f"spotify:playlist:{pid}"
+        if uri not in seen:
+            seen.add(uri)
+            found.append(uri)
+    return found
+
+
 # ─── Auto-Save External Playlists ────────────────────────────────────────────
 
 def _auto_save_playlist(account_id: str, playlist_uri: str, sp=None):
@@ -770,15 +789,36 @@ def api_add_playlist(account_id):
     if not acc:
         return jsonify({"error": "Account not found"}), 404
     data = request.json
-    uri = data.get("uri", "").strip() if data else ""
-    normalized = normalize_playlist_uri(uri)
-    if not normalized:
-        return jsonify({"error": "Invalid playlist URI or URL"}), 400
-    if normalized in acc["playlists"]:
-        return jsonify({"error": "Playlist already added"}), 400
-    acc["playlists"].append(normalized)
+    raw = data.get("uri", "") if data else ""
+
+    # Extract all playlist URIs from the pasted text (bulk paste support)
+    uris = extract_all_playlist_uris(raw)
+
+    # Fallback: single URI via normalize (handles edge cases)
+    if not uris:
+        normalized = normalize_playlist_uri(raw)
+        if normalized:
+            uris = [normalized]
+
+    if not uris:
+        return jsonify({"error": "No valid Spotify playlist URLs or URIs found"}), 400
+
+    added = []
+    skipped = []
+    for uri in uris:
+        if uri in acc["playlists"]:
+            skipped.append(uri)
+        else:
+            acc["playlists"].append(uri)
+            added.append(uri)
+
     save_account(account_id, acc)
-    return jsonify({"ok": True, "playlists": acc["playlists"]})
+    return jsonify({
+        "ok": True,
+        "added": len(added),
+        "skipped": len(skipped),
+        "playlists": acc["playlists"],
+    })
 
 
 @app.route("/api/remove_playlist/<account_id>/<int:playlist_index>", methods=["DELETE"])

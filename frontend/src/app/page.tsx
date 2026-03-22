@@ -234,7 +234,7 @@ export default function Dashboard() {
                     value={playlistInputs[acc.id] || ""}
                     onChange={(e) => setPlaylistInputs((p) => ({ ...p, [acc.id]: e.target.value }))}
                     onKeyDown={(e) => e.key === "Enter" && addPlaylist(acc.id)}
-                    placeholder="Paste playlist URL or URI"
+                    placeholder="Paste one or multiple playlist URLs (space or newline separated)"
                     className="flex-1 px-3 py-2 bg-black/20 border border-white/10 rounded-lg focus:outline-none focus:border-brand-cyan transition-all text-sm"
                   />
                   <button onClick={() => addPlaylist(acc.id)} className="px-4 py-2 rounded-lg text-xs font-semibold bg-white/5 border border-white/10 hover:border-brand-cyan hover:bg-brand-cyan/10 transition-all">+ Add</button>
