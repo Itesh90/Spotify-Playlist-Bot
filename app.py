@@ -177,8 +177,8 @@ def normalize_playlist_uri(uri_or_url: str) -> str | None:
 
 # ─── Auto-Save External Playlists ────────────────────────────────────────────
 
-def _auto_save_playlist(account_id: str, playlist_uri: str):
-    """If playlist_uri is not already saved for this account, add and persist it."""
+def _auto_save_playlist(account_id: str, playlist_uri: str, sp=None):
+    """If playlist_uri is not already saved for this account, add it and follow it on Spotify."""
     acc = load_account(account_id)
     if not acc:
         return
@@ -187,6 +187,19 @@ def _auto_save_playlist(account_id: str, playlist_uri: str):
         save_account(account_id, acc)
         playlist_id = playlist_uri.split(":")[-1]
         add_log(account_id, f"Auto-saved new playlist: {playlist_id}")
+
+        # Also follow/save the playlist on the actual Spotify account
+        if sp:
+            try:
+                requests.put(
+                    f"https://api.spotify.com/v1/playlists/{playlist_id}/followers",
+                    headers={"Authorization": f"Bearer {sp._auth}"},
+                    json={"public": False},
+                    timeout=10
+                )
+                add_log(account_id, f"Followed playlist on Spotify: {playlist_id}")
+            except Exception:
+                pass  # Non-critical
 
 
 # ─── Spotify Auth Helpers ─────────────────────────────────────────────────────
@@ -546,7 +559,7 @@ def run_bot(account_id: str):
             if (context_uri
                     and context_uri != playlist_uri
                     and context_uri.startswith("spotify:playlist:")):
-                _auto_save_playlist(account_id, context_uri)
+                _auto_save_playlist(account_id, context_uri, sp)
 
             # Case 1: Context changed (Spotify autoplay kicked in)
             if context_uri and context_uri != playlist_uri:
@@ -584,15 +597,16 @@ def run_bot(account_id: str):
                     add_log(account_id, "Playlist looped to start, advancing")
                     break
 
-            # Case 3: Paused after last track was seen
+            # Case 3: Paused handling
             if not is_playing:
                 pause_count += 1
+                # Only advance if paused AFTER the last track finished
                 if last_track_seen and pause_count >= 2:
                     add_log(account_id, "Playback paused after last track, advancing")
                     break
-                if pause_count >= 6:
-                    add_log(account_id, "Playback paused for 30s, advancing")
-                    break
+                # Otherwise just wait — user paused mid-playlist, log every ~60s
+                if pause_count % 30 == 0:
+                    add_log(account_id, "⏸ Paused — waiting for resume...")
             else:
                 pause_count = 0
 
