@@ -191,16 +191,8 @@ def _auto_save_playlist(account_id: str, playlist_uri: str, sp=None):
         # Also follow/save the playlist on the actual Spotify account
         if sp:
             try:
-                resp = requests.put(
-                    f"https://api.spotify.com/v1/playlists/{playlist_id}/followers",
-                    headers={"Authorization": f"Bearer {sp._auth}"},
-                    json={"public": False},
-                    timeout=10
-                )
-                if resp.status_code in (200, 201):
-                    add_log(account_id, f"Followed playlist on Spotify: {playlist_id}")
-                else:
-                    add_log(account_id, f"Failed to follow playlist {playlist_id}: HTTP {resp.status_code}")
+                sp.current_user_follow_playlist(playlist_id)
+                add_log(account_id, f"Followed playlist on Spotify: {playlist_id}")
             except Exception as e:
                 add_log(account_id, f"Follow request failed for {playlist_id}: {e}")
 
@@ -396,16 +388,8 @@ def run_bot(account_id: str):
 
         # Auto-follow playlist
         try:
-            follow_resp = requests.put(
-                f"https://api.spotify.com/v1/playlists/{playlist_id}/followers",
-                headers={"Authorization": f"Bearer {sp._auth}"},
-                json={"public": False},
-                timeout=10
-            )
-            if follow_resp.status_code in (200, 201):
-                add_log(account_id, f"Auto-followed playlist: {playlist_id}")
-            else:
-                add_log(account_id, f"Failed to follow playlist {playlist_id}: HTTP {follow_resp.status_code}")
+            sp.current_user_follow_playlist(playlist_id)
+            add_log(account_id, f"Auto-followed playlist: {playlist_id}")
         except Exception as e:
             add_log(account_id, f"Follow request failed for {playlist_id}: {e}")
 
