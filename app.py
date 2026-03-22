@@ -27,11 +27,15 @@ CORS(app, supports_credentials=True, origins=[os.environ.get("FRONTEND_URL", "ht
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 TOKENS_DIR = os.path.join(DATA_DIR, "tokens")
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+if FRONTEND_URL and not FRONTEND_URL.startswith("http"):
+    FRONTEND_URL = f"https://{FRONTEND_URL}"
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 os.makedirs(TOKENS_DIR, exist_ok=True)
 
-BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000")
+BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+if BASE_URL and not BASE_URL.startswith("http"):
+    BASE_URL = f"https://{BASE_URL}"
 REDIRECT_URI = f"{BASE_URL}/callback"
 SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public user-read-currently-playing"
 
