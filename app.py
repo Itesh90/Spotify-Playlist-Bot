@@ -828,11 +828,10 @@ def api_stop_all():
 # ─── OAuth Routes ─────────────────────────────────────────────────────────────
 
 @app.route("/authorize/<account_id>")
-@login_required
 def auth_login(account_id):
     acc = load_account(account_id)
     if not acc:
-        return "Account not found", 404
+        return jsonify({"error": "Account not found"}), 404
     oauth = get_oauth(acc)
     auth_url = oauth.get_authorize_url(state=account_id)
     return redirect(auth_url)
