@@ -171,6 +171,20 @@ def normalize_playlist_uri(uri_or_url: str) -> str | None:
     return None
 
 
+# ─── Auto-Save External Playlists ────────────────────────────────────────────
+
+def _auto_save_playlist(account_id: str, playlist_uri: str):
+    """If playlist_uri is not already saved for this account, add and persist it."""
+    acc = load_account(account_id)
+    if not acc:
+        return
+    if playlist_uri not in acc.get("playlists", []):
+        acc["playlists"].append(playlist_uri)
+        save_account(account_id, acc)
+        playlist_id = playlist_uri.split(":")[-1]
+        add_log(account_id, f"Auto-saved new playlist: {playlist_id}")
+
+
 # ─── Spotify Auth Helpers ─────────────────────────────────────────────────────
 
 def get_oauth(account: dict) -> SpotifyOAuth:
@@ -523,6 +537,12 @@ def run_bot(account_id: str):
             # Log status every ~30 seconds (15 polls at 2s)
             if poll_num % 15 == 0:
                 add_log(account_id, f"♪ {current_track_name[:30]} | {'▶' if is_playing else '⏸'} | seen={len(seen_track_uris)}/{total_count}")
+
+            # Auto-save: if user switched to an external playlist, save it
+            if (context_uri
+                    and context_uri != playlist_uri
+                    and context_uri.startswith("spotify:playlist:")):
+                _auto_save_playlist(account_id, context_uri)
 
             # Case 1: Context changed (Spotify autoplay kicked in)
             if context_uri and context_uri != playlist_uri:
