@@ -1,0 +1,27 @@
+services:
+  # ─── Python Backend ────────────────────────────────────────────────────────
+  - type: web
+    name: spotify-bot-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: BASE_URL
+        sync: false # Set to your backend URL after first deploy
+      - key: FRONTEND_URL
+        sync: false # Set to your frontend URL after first deploy
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
+  # ─── Next.js Frontend ──────────────────────────────────────────────────────
+  - type: web
+    name: spotify-bot-frontend
+    env: node
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        sync: false # Set to your backend URL

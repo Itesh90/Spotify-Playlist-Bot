@@ -21,6 +21,8 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
 app.config["SESSION_PERMANENT"] = True
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
+app.config["SESSION_COOKIE_SAMESITE"] = "None"   # Required for cross-domain cookies
+app.config["SESSION_COOKIE_SECURE"] = True        # Required when SameSite=None
 CORS(app, supports_credentials=True, origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")])
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
