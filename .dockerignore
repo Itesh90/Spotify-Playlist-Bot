@@ -1,0 +1,12 @@
+# Ignore heavy/dev directories from Docker builds
+.git
+.venv
+__pycache__
+node_modules
+frontend/.next
+frontend/node_modules
+.agent
+.env
+*.pyc
+storage/
+data/

@@ -1,0 +1,59 @@
+# ─── Spotify Playlist Bot — Docker Compose Orchestration ─────────────────────
+# The orchestrator (backend) runs always. Worker containers are spawned
+# dynamically per-account via the Docker SDK inside app.py.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── Orchestrator: Flask Backend ──────────────────────────────────────────────
+  backend:
+    build:
+      context: .                         # Root context so app.py is included
+      dockerfile: backend/Dockerfile
+    container_name: spb_orchestrator
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - BASE_URL=${BASE_URL:-http://localhost:5000}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - WORKER_IMAGE=spb_worker:latest        # image used to spawn worker containers
+      - DATA_DIR=/app/data
+      - HOST_STORAGE_PATH=/app/storage/accounts
+    volumes:
+      - ./storage/accounts:/app/storage/accounts  # Per-account session data + live.jpeg
+      - ./data:/app/data                          # Account JSON files
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker-in-Docker (spawn workers)
+    networks:
+      - spb_net
+
+  # ── Frontend: Next.js Dashboard ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: spb_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:5000
+    depends_on:
+      - backend
+    networks:
+      - spb_net
+
+# ─── Networks ─────────────────────────────────────────────────────────────────
+networks:
+  spb_net:
+    driver: bridge
+    name: spb_net
+
+# ─── Volumes ──────────────────────────────────────────────────────────────────
+# Worker containers mount named volumes below for per-account storage.
+# These are created automatically — no manual 'docker volume create' needed.
+volumes:
+  spb_storage:

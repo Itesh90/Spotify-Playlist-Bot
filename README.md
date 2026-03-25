@@ -1,122 +1,85 @@
-# 🎵 Spotify Playlist Bot
+# 🎵 Spotify Playlist Bot — V2 Fleet Architecture
 
-A multi-account Spotify playlist automation bot with a web dashboard. Add your Spotify accounts, queue up playlists, and the bot plays them sequentially — hands-free.
+A massively scalable, multi-account Spotify playlist automation framework. Deploy a centralized Next.js Fleet Command Center to orchestrate dozens of isolated Docker "Worker Pods", each running an independent Playwright browser, separate Spotipy instances, and isolated VPN tunnels.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
-![Flask](https://img.shields.io/badge/Flask-Backend-black?logo=flask)
-![Spotify](https://img.shields.io/badge/Spotify-API-1DB954?logo=spotify&logoColor=white)
-
----
-
-## Features
-
-- **Multi-Account Support** — Add multiple Spotify accounts, each with their own API credentials
-- **Sequential Playlist Playback** — Plays through playlists one by one, in order
-- **Auto-Follow Playlists** — Automatically saves playlists to your library
-- **Smart End Detection** — Detects when a playlist ends via 4 strategies:
-  - Context change (autoplay kicks in)
-  - Unknown track detection (autoplay injects a song)
-  - Loop detection (playlist restarts from track 1)
-  - Pause detection (playback pauses after last track)
-- **OAuth Per Account** — Each account authorizes independently, tokens cached to disk
-- **Live Dashboard** — Dark-theme web UI with status badges, progress bars, activity logs
-- **Shuffle/Repeat Disabled** — Ensures clean sequential playback
+![Next.js](https://img.shields.io/badge/Next.js-UI-black)
+![React](https://img.shields.io/badge/React-Component-blue)
+![Python](https://img.shields.io/badge/Python-Backend-3776AB)
+![Docker](https://img.shields.io/badge/Docker-Orchestration-2496ED)
+![Playwright](https://img.shields.io/badge/Playwright-Automated_Browser-2EAD33)
 
 ---
 
-## Quick Start
+## 🚀 Features
 
-### 1. Clone & Install
+- **Docker-Orchestrated Scaling**: The Python backend acts as an orchestrator, dynamically spinning up completely isolated container environments per Spotify account via the Docker Engine API.
+- **True Isolation**: Each worker node maintains its own browser fingerprint, cookie cache, and optionally an isolated IP address (via WireGuard/OpenVPN built into the worker).
+- **Fleet Command Center**: A stunning, high-performance Next.js dashboard featuring real-time container log streaming, Node status glowing indicators, and global kill switches.
+- **Mainframe CCTV Grid**: Live visual monitoring of all headless Playwright browsers happening simultaneously in a multi-camera grid.
+- **Interactive VNC Auth Flow**: Bypass complex captchas and multi-factor authentication by dropping into a live, GUI-based Interactive Setup session once per account. Cookies are cached globally and injected into headless runners.
+
+---
+
+## 🏗️ Architecture
+
+```text
+/spotify-playlist-bot
+├── docker-compose.yml       # Orchestrates the Flask Backend + Next.js Frontend
+├── backend/                 # Flask Orchestrator API (port 5000)
+├── frontend/                # Next.js Command Center (port 3000)
+├── worker/                  # Base image for dynamic Account Pods
+└── storage/                 # Persistent volumes (Mounted to workers dynamically)
+    └── accounts/            # Stores session.json for each account
+```
+
+---
+
+## ⚙️ Quick Start (Deployment)
+
+### 1. Requirements
+
+- **Docker** and **Docker Compose** installed.
+- (Windows users) Docker Desktop must be running with WSL2 integration enabled.
+- A `.env` file at the root (copy from `.env.example`).
+
+### 2. Build the Worker Node Image
+
+Before starting the orchestrator, you must build the base `spb_worker` image which the backend will use to spawn temporary pods.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Spotify-Playlist-Bot.git
-cd Spotify-Playlist-Bot
-pip install -r requirements.txt
+docker build -t spb_worker:latest ./worker
 ```
 
-### 2. Spotify App Setup
+### 3. Launch the Fleet Orchestrator
 
-For **each** Spotify account you want to use:
-
-1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Create a new app
-3. Add `http://127.0.0.1:5000/callback` as a **Redirect URI**
-4. Copy the **Client ID** and **Client Secret**
-
-### 3. Run
+Bring up the Flask Backend and the Next.js Frontend.
 
 ```bash
-python app.py
+docker-compose up -d --build
 ```
 
-Open **http://127.0.0.1:5000** in your browser.
+### 4. Access the Command Center
 
-### 4. Use
-
-1. **Add Account** — Enter a name, Client ID, and Client Secret
-2. **Authorize** — Click the Authorize button, log in to Spotify
-3. **Add Playlists** — Paste Spotify playlist URLs or URIs
-4. **Start** — Click Start and the bot takes over
+- Open **http://localhost:3000** in your browser.
+- Log in using the default passcode: `admin123`.
 
 ---
 
-## Deploy to Railway
+## 🎮 How to Use the Bot
 
-1. Push this repo to GitHub
-2. Connect it to [Railway](https://railway.app)
-3. Set environment variables:
-
-| Variable | Value |
-|----------|-------|
-| `BASE_URL` | `https://your-app.up.railway.app` |
-| `SECRET_KEY` | Any random string |
-
-4. Update each Spotify app's Redirect URI to `https://your-app.up.railway.app/callback`
-
----
-
-## Project Structure
-
-```
-├── app.py              # Flask backend (API + bot engine)
-├── templates/
-│   └── index.html      # Dashboard UI
-├── requirements.txt    # Python dependencies
-├── Procfile            # Railway/Heroku deployment
-└── data/               # Created at runtime (gitignored)
-    ├── account_*.json  # Per-account config
-    └── tokens/         # Cached OAuth tokens
-```
+1. **Register an Account**: In the UI, enter an Account Name and Spotify API credentials (Client ID/Secret).
+2. **Interactive Setup (MFA Bypass)**: 
+   - Click "Setup Node" on an account. The orchestrator will spawn a worker container with a visible browser.
+   - Using a VNC client, connect to the container, log in manually to Spotify, and press complete in the terminal.
+   - Your session cookies are permanently saved to `/storage/accounts/<id>/session.json`.
+3. **Deploy Headless Fleet**: 
+   - Click "Run Headless". The Orchestrator rips down the setup container and spawns a lightweight headless Playwright container using the saved session cookies.
+   - It will automatically establish itself as the active Spotify device and execute your playlist queue sequentially.
+4. **Monitor Mainframe**:
+   - Access the Mainframe tab to watch physical screencasts of your headless fleet at work in real-time.
 
 ---
 
-## API Endpoints
+## 🛡️ License
 
-| Method | Route | Description |
-|--------|-------|-------------|
-| `GET` | `/` | Dashboard |
-| `GET` | `/api/accounts` | List all accounts |
-| `POST` | `/api/accounts` | Add account |
-| `DELETE` | `/api/accounts/<id>` | Delete account |
-| `POST` | `/api/accounts/<id>/playlists` | Add playlist |
-| `DELETE` | `/api/accounts/<id>/playlists/<idx>` | Remove playlist |
-| `POST` | `/api/accounts/<id>/start` | Start bot |
-| `POST` | `/api/accounts/<id>/stop` | Stop bot |
-| `POST` | `/api/start-all` | Start all bots |
-| `POST` | `/api/stop-all` | Stop all bots |
-| `GET` | `/auth/<id>` | OAuth login |
-| `GET` | `/callback` | OAuth callback |
-
----
-
-## Requirements
-
-- Python 3.10+
-- Spotify Premium account(s)
-- Active Spotify device (phone, desktop, or web player)
-
----
-
-## License
-
-MIT
+MIT License

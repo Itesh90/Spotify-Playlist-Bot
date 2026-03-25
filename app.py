@@ -356,6 +356,16 @@ def run_bot(account_id: str):
         set_status(account_id, "error")
         return
 
+    # ── Human-like delay profile (unique per account session) ─────────────
+    delay_profile = {
+        "playlist_gap_min": random.randint(45, 90),     # 45s – 1.5min between playlists
+        "playlist_gap_max": random.randint(100, 180),    # up to 3min
+        "poll_base": random.uniform(1.5, 3.0),           # polling jitter base
+        "track_pause_min": random.uniform(0.3, 1.0),     # brief pause on track change
+        "track_pause_max": random.uniform(1.5, 3.0),     # max pause on track change
+    }
+    add_log(account_id, f"Delay profile: gap={delay_profile['playlist_gap_min']}-{delay_profile['playlist_gap_max']}s, poll={delay_profile['poll_base']:.1f}s")
+
     set_status(account_id, "starting")
     add_log(account_id, "Bot starting...")
 
@@ -373,9 +383,12 @@ def run_bot(account_id: str):
     except Exception as e:
         add_log(account_id, f"Could not set shuffle/repeat: {e}")
 
+    # Resume from where we stopped (persisted across restarts)
     current_index = acc.get("current_index", 0)
     if current_index >= len(acc["playlists"]):
         current_index = 0
+    if current_index > 0:
+        add_log(account_id, f"Resuming from playlist {current_index + 1}/{len(acc['playlists'])}")
 
     while not stop_flag.is_set() and current_index < len(acc["playlists"]):
         playlist_uri = acc["playlists"][current_index]
@@ -488,7 +501,8 @@ def run_bot(account_id: str):
         auth_header = {"Authorization": f"Bearer {sp._auth}"}
 
         while not stop_flag.is_set():
-            time.sleep(2)
+            # Jittered poll interval to appear human
+            time.sleep(delay_profile["poll_base"] + random.uniform(-0.3, 0.5))
             poll_num += 1
 
             # Re-get spotify client to handle token refresh
@@ -544,6 +558,9 @@ def run_bot(account_id: str):
             prev_track_uri = current_track_uri
 
             if track_changed:
+                # Human micro-pause: simulate reaction time on track change
+                micro_pause = random.uniform(delay_profile["track_pause_min"], delay_profile["track_pause_max"])
+                time.sleep(micro_pause)
                 add_log(account_id, f"Now playing: {current_track_name[:35]} ({len(seen_track_uris)}/{total_count})")
                 # Check queue for autoplay
                 try:
@@ -620,9 +637,9 @@ def run_bot(account_id: str):
             else:
                 pause_count = 0
 
-        # Humanized delay before next playlist (10-30s random)
-        delay = random.randint(10, 30)
-        add_log(account_id, f"Waiting {delay}s before next playlist...")
+        # Humanized delay before next playlist (per-account profile: 45s – 3min)
+        delay = random.randint(delay_profile["playlist_gap_min"], delay_profile["playlist_gap_max"])
+        add_log(account_id, f"Waiting {delay}s before next playlist (human delay)...")
         for _ in range(delay):
             if stop_flag.is_set():
                 break
@@ -673,10 +690,10 @@ def start_bot(account_id: str) -> str | None:
         set_status(account_id, "error")
         return msg
 
-    # Reset state
-    acc["current_index"] = 0
+    # Resume from last position (don't reset current_index)
     acc["status"] = "starting"
     save_account(account_id, acc)
+    add_log(account_id, f"Starting from playlist {acc.get('current_index', 0) + 1}/{len(acc['playlists'])}")
 
     stop_flag = threading.Event()
     bot_stop_flags[account_id] = stop_flag
@@ -874,6 +891,47 @@ def api_stop_all():
     return jsonify({"ok": True})
 
 
+@app.route("/api/reset_queue/<account_id>", methods=["POST"])
+@login_required
+def api_reset_queue(account_id):
+    """Reset the playlist queue back to the beginning (index 0)."""
+    acc = load_account(account_id)
+    if not acc:
+        return jsonify({"error": "Account not found"}), 404
+    # Stop the bot if running, then reset index
+    stop_bot(account_id)
+    acc = load_account(account_id)
+    acc["current_index"] = 0
+    acc["status"] = "idle"
+    save_account(account_id, acc)
+    add_log(account_id, "Queue reset — will restart from playlist 1")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/reauthorize/<account_id>", methods=["POST"])
+@login_required
+def api_reauthorize(account_id):
+    """Force re-authorization by clearing cached token and redirecting to OAuth."""
+    acc = load_account(account_id)
+    if not acc:
+        return jsonify({"error": "Account not found"}), 404
+    # Clear cached token files (both our format and spotipy .cache)
+    token_path = _token_path(account_id)
+    if os.path.exists(token_path):
+        os.remove(token_path)
+    # Also clear spotipy's .cache file if it exists
+    spotipy_cache = os.path.join(TOKENS_DIR, f".cache-{account_id}")
+    if os.path.exists(spotipy_cache):
+        os.remove(spotipy_cache)
+    acc["authorized"] = False
+    save_account(account_id, acc)
+    add_log(account_id, "Authorization cleared — click Authorize to re-login")
+    # Return the OAuth URL for the frontend to redirect to
+    oauth = get_oauth(acc)
+    auth_url = oauth.get_authorize_url(state=account_id)
+    return jsonify({"ok": True, "auth_url": auth_url})
+
+
 # ─── OAuth Routes ─────────────────────────────────────────────────────────────
 
 @app.route("/authorize/<account_id>")
@@ -910,8 +968,157 @@ def auth_callback():
     return redirect(FRONTEND_URL)
 
 
+# ─── Docker Orchestration API (v2) ───────────────────────────────────────────
+# These routes use Docker containers instead of threads.
+# Existing /api/* routes above are preserved for backwards compatibility.
+# New /api/v2/* routes are the path forward for multi-account isolation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DOCKER_AVAILABLE = False
+docker_mgr = None
+
+# Host-side path to per-account storage (used by /api/v2/screen to serve live.jpeg)
+HOST_STORAGE = os.environ.get("HOST_STORAGE_PATH", os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "storage", "accounts"
+))
+
+try:
+    import backend.docker_manager as docker_mgr  # type: ignore
+    # Quick connectivity test
+    import docker as _docker_lib
+    _docker_lib.from_env().ping()
+    DOCKER_AVAILABLE = True
+except Exception as _docker_err:
+    pass  # Docker not available in this environment (e.g., local dev without Docker)
+
+
+@app.route("/api/v2/start/<account_id>", methods=["POST"])
+@login_required
+def api_v2_start(account_id):
+    """Start a worker container for this account (Docker mode)."""
+    if not DOCKER_AVAILABLE:
+        return jsonify({"error": "Docker not available on this host"}), 503
+    acc = load_account(account_id)
+    if not acc:
+        return jsonify({"error": "Account not found"}), 404
+    if not acc.get("authorized"):
+        return jsonify({"error": "Account not authorized — run Spotify OAuth first"}), 400
+
+    data = request.json or {}
+    proxy_url = data.get("proxy_url", "")
+
+    err = docker_mgr.start_worker(account_id, proxy_url=proxy_url)
+    if err:
+        return jsonify({"error": err}), 500
+
+    set_status(account_id, "playing")
+    add_log(account_id, "Worker container started (Docker mode)")
+    return jsonify({"ok": True, "mode": "docker"})
+
+
+@app.route("/api/v2/stop/<account_id>", methods=["POST"])
+@login_required
+def api_v2_stop(account_id):
+    """Stop and remove the worker container for this account."""
+    if not DOCKER_AVAILABLE:
+        return jsonify({"error": "Docker not available on this host"}), 503
+    err = docker_mgr.stop_worker(account_id)
+    if err:
+        return jsonify({"error": err}), 500
+    set_status(account_id, "idle")
+    add_log(account_id, "Worker container stopped (Docker mode)")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/v2/logs/<account_id>", methods=["GET"])
+@login_required
+def api_v2_logs(account_id):
+    """Stream the last N log lines from the worker container."""
+    if not DOCKER_AVAILABLE:
+        # Fallback: return stored log entries from account JSON
+        acc = load_account(account_id)
+        if not acc:
+            return jsonify({"error": "Account not found"}), 404
+        return jsonify({"logs": acc.get("log", []), "source": "json"})
+
+    tail = int(request.args.get("tail", 50))
+    lines = docker_mgr.get_logs(account_id, tail=tail)
+    return jsonify({"logs": lines, "source": "docker"})
+
+
+@app.route("/api/v2/setup/<account_id>", methods=["POST"])
+@login_required
+def api_v2_setup(account_id):
+    """
+    Start the account's worker in INTERACTIVE mode for one-time Spotify login.
+    The container opens a visible Firefox window. User logs in manually.
+    Session is saved to /storage/accounts/{id}/session.json.
+    """
+    if not DOCKER_AVAILABLE:
+        return jsonify({"error": "Docker not available on this host"}), 503
+    acc = load_account(account_id)
+    if not acc:
+        return jsonify({"error": "Account not found"}), 404
+
+    data = request.json or {}
+    proxy_url = data.get("proxy_url", "")
+
+    err = docker_mgr.setup_login(account_id, proxy_url=proxy_url)
+    if err:
+        return jsonify({"error": err}), 500
+
+    add_log(account_id, "Interactive setup container started — log in to Spotify in the browser")
+    return jsonify({"ok": True, "message": "Setup container running. Open VNC to complete login."})
+
+
+@app.route("/api/v2/fleet", methods=["GET"])
+@login_required
+def api_v2_fleet():
+    """
+    Returns the real-time status of all worker containers.
+    Merges Docker container statuses with account metadata for the dashboard.
+    """
+    accounts = load_all_accounts()
+    if DOCKER_AVAILABLE:
+        docker_statuses = docker_mgr.get_all_worker_statuses()
+    else:
+        docker_statuses = {}
+
+    fleet = []
+    for acc in accounts:
+        aid = acc["id"]
+        docker_status = docker_statuses.get(aid)
+        fleet.append({
+            "id": aid,
+            "name": acc["name"],
+            "authorized": acc.get("authorized", False),
+            "playlists": len(acc.get("playlists", [])),
+            "current_index": acc.get("current_index", 0),
+            "status": docker_status or acc.get("status", "idle"),
+            "docker_available": DOCKER_AVAILABLE,
+            "container_running": docker_status == "running",
+        })
+    return jsonify(fleet)
+
+
+@app.route("/api/v2/screen/<account_id>", methods=["GET"])
+@login_required
+def api_v2_screen(account_id):
+    """
+    Returns the latest live.jpeg from the worker's DATA_DIR.
+    Used for the Mainframe Live Grid.
+    """
+    from flask import send_file
+    screen_path = os.path.join(HOST_STORAGE, account_id, "live.jpeg")
+    if os.path.exists(screen_path):
+        return send_file(screen_path, mimetype='image/jpeg')
+    else:
+        return jsonify({"error": "No screen available"}), 404
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+

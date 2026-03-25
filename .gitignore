@@ -3,15 +3,37 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environment
+# Virtual environments
 .venv/
 venv/
 ENV/
+.env
+.env.*
+!.env.example
 
-# Data files (tokens and account configs)
+# Spotify Bot Sensitive Data (TOKENS & CONFIGS)
+# Pushing these to GitHub will leak your account/client credentials
 data/
+storage/
 
-# IDE
+# Logs
+*.log
+data/logs/
+
+# Next.js / Node.js
+**/node_modules/
+**/.next/
+**/out/
+**/build/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# IDEs
 .vscode/
 .idea/
 *.swp
@@ -22,13 +44,7 @@ data/
 Thumbs.db
 desktop.ini
 
-# Agent config (not needed for runtime)
+# Agent & Misc
 .agent/
-
-# Misc
-*.log
-
-# Environment variables
-.env
-.env.*
-!.env.example
+.gemini/
+.python-version
