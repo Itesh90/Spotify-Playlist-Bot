@@ -1,0 +1,19 @@
+{
+  "name": "Spotify Playlist Bot",
+  "forwardPorts": [3000, 5000, 6081],
+  "portsAttributes": {
+    "3000": {
+      "label": "Frontend",
+      "onAutoForward": "notify"
+    },
+    "5000": {
+      "label": "Backend API",
+      "onAutoForward": "notify"
+    },
+    "6081": {
+      "label": "noVNC (Login Browser)",
+      "visibility": "public",
+      "onAutoForward": "notify"
+    }
+  }
+}

@@ -139,8 +139,10 @@ def _start_vnc_services() -> list[subprocess.Popen]:
     log.info(f"Worker {ACCOUNT_ID}: Xvfb started on :99")
 
     # 2. Start x11vnc — captures the Xvfb display
+    #    With host networking, bind to localhost only (websockify connects locally).
+    #    Binding to 0.0.0.0 would expose raw VNC to the entire VM.
     x11vnc = subprocess.Popen(
-        ["x11vnc", "-display", ":99", "-nopw", "-listen", "0.0.0.0",
+        ["x11vnc", "-display", ":99", "-nopw", "-listen", "localhost",
          "-xkb", "-forever", "-quiet", "-rfbport", "5900"],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
@@ -155,13 +157,19 @@ def _start_vnc_services() -> list[subprocess.Popen]:
     # 3. Start websockify — bridges WebSocket (VNC_PORT) → VNC (5900)
     #    With host networking, websockify binds directly to the VM port.
     #    noVNC downloaded from GitHub to /opt/novnc in the Dockerfile.
+    #    --heartbeat=30 keeps the WebSocket alive through Codespaces proxy.
     novnc_web = "/opt/novnc"
     websockify = subprocess.Popen(
-        ["websockify", f"0.0.0.0:{VNC_PORT}", "localhost:5900", "--web", novnc_web],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        ["websockify", f"0.0.0.0:{VNC_PORT}", "localhost:5900",
+         "--web", novnc_web, "--heartbeat=30"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
     procs.append(websockify)
-    time.sleep(0.5)
+    time.sleep(2)  # Give websockify time to bind and accept connections
+    if websockify.poll() is not None:
+        stderr = websockify.stderr.read().decode() if websockify.stderr else ""
+        log.error(f"Worker {ACCOUNT_ID}: websockify CRASHED! stderr: {stderr}")
+        return procs
     log.info(f"Worker {ACCOUNT_ID}: websockify/noVNC started on port {VNC_PORT} (web={novnc_web})")
 
     return procs
