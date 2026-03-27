@@ -206,27 +206,49 @@ def run_interactive_setup():
             log.info(f"Worker {ACCOUNT_ID}: Browser is open. Waiting for user to log in...")
 
             # ── Auto-detect login via URL polling ─────────────────────────
+            # Phase 1: Wait for Spotify to redirect to the login page.
+            #           This prevents false-positives from the brief initial
+            #           open.spotify.com URL before the auth redirect fires.
+            # Phase 2: Once on the login page, wait for user to finish login
+            #           and return to the Spotify Web Player.
             spotify_user = None
+            seen_login_page = False
             poll_count = 0
-            max_wait = 600  # 10 minutes max
+            max_polls = 300  # 10 minutes (300 × 2s)
 
-            while not _shutdown and poll_count < max_wait // 2:
+            log.info(f"Worker {ACCOUNT_ID}: Phase 1 — waiting for Spotify login page to appear...")
+
+            while not _shutdown and poll_count < max_polls:
                 time.sleep(2)
                 poll_count += 1
 
                 try:
                     current_url = page.url
 
-                    # Still on login/auth page — keep waiting
-                    if "accounts.spotify.com" in current_url or "login" in current_url:
-                        if poll_count % 15 == 0:  # Log every 30 seconds
-                            log.info(f"Worker {ACCOUNT_ID}: Still waiting for login... ({poll_count * 2}s)")
+                    # Phase 1: detect login page
+                    if not seen_login_page:
+                        if ("accounts.spotify.com" in current_url or
+                                "login" in current_url or
+                                "spotify.com/login" in current_url):
+                            seen_login_page = True
+                            log.info(f"Worker {ACCOUNT_ID}: Phase 2 — login page detected. Waiting for user to log in...")
+                        else:
+                            # Still on initial page — not yet redirected to login
+                            if poll_count % 10 == 0:
+                                log.info(f"Worker {ACCOUNT_ID}: Waiting for login page redirect... ({poll_count * 2}s) url={current_url[:60]}")
                         continue
 
-                    # Spotify Web Player loaded — login is complete!
-                    if "open.spotify.com" in current_url and "login" not in current_url:
-                        log.info(f"Worker {ACCOUNT_ID}: Login detected! Saving session...")
-                        time.sleep(3)  # Let page fully load
+                    # Phase 2: login page was seen — now watch for successful login
+                    if "accounts.spotify.com" in current_url or "login" in current_url:
+                        # Still on login/auth page
+                        if poll_count % 15 == 0:
+                            log.info(f"Worker {ACCOUNT_ID}: User is on login page... ({poll_count * 2}s)")
+                        continue
+
+                    # Back on open.spotify.com without login in URL = logged in!
+                    if "open.spotify.com" in current_url:
+                        log.info(f"Worker {ACCOUNT_ID}: Login detected! URL={current_url}. Saving session...")
+                        time.sleep(3)  # Let page fully settle
 
                         # Capture Spotify username from the DOM
                         try:
