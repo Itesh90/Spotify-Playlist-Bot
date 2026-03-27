@@ -216,6 +216,7 @@ def setup_login(account_id: str, proxy_url: str = "") -> tuple[str | None, int |
     env = {
         "ACCOUNT_ID": account_id,
         "INTERACTIVE": "1",
+        "VNC_PORT": str(vnc_port),              # Worker binds websockify to this port directly
     }
     if proxy_url:
         env["PROXY_URL"] = proxy_url
@@ -247,8 +248,7 @@ def setup_login(account_id: str, proxy_url: str = "") -> tuple[str | None, int |
                     "mode": "rw",
                 }
             },
-            ports={"6080/tcp": vnc_port},        # noVNC WebSocket port
-            network="spb_net",
+            network_mode="host",                # Bind directly to VM ports (Codespaces DinD fix)
             mem_limit="1g",
         )
 
