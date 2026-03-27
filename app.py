@@ -9,7 +9,6 @@ import threading
 from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, redirect, session
-from flask_cors import CORS
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 import spotipy
@@ -21,18 +20,34 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
 app.config["SESSION_PERMANENT"] = True
 
-# 🚀 Robust CORS for Codespaces (Allow any *.app.github.dev subdomain)
-_cors_origins = [
-    r"https?://.*\.app\.github\.dev",  # GitHub Codespaces (string regex, not compiled)
-    "http://localhost:3000",            # Local Dev
-]
-if os.environ.get("FRONTEND_URL"):     # Only add if actually set
-    _cors_origins.append(os.environ["FRONTEND_URL"])
+# 🚀 Robust CORS — manual handler (flask-cors regex is unreliable for Codespaces)
+_ALLOWED_ORIGINS = {"http://localhost:3000"}
+if os.environ.get("FRONTEND_URL"):
+    _ALLOWED_ORIGINS.add(os.environ["FRONTEND_URL"])
 
-CORS(app, supports_credentials=True,
-     origins=_cors_origins,
-     allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+def _is_origin_allowed(origin: str) -> bool:
+    """Allow any *.app.github.dev subdomain + explicit allowlist."""
+    if not origin:
+        return False
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    # Match any GitHub Codespace forwarded port
+    if origin.endswith(".app.github.dev") or ".app.github.dev" in origin:
+        return True
+    return False
+
+@app.after_request
+def _cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    if _is_origin_allowed(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    # Handle preflight
+    if request.method == "OPTIONS":
+        response.status_code = 200
+    return response
 
 # Ensure all session cookies work across the port-forwarded domain
 app.config.update(
@@ -605,12 +620,15 @@ def run_bot(account_id: str):
                 _auto_save_playlist(account_id, context_uri, sp)
 
             # Case 1: Context changed (Spotify autoplay kicked in)
-            if context_uri and context_uri != playlist_uri:
+            # Only trust this if we have a known track_set — otherwise we
+            # can't distinguish autoplay from a playlist we failed to read.
+            if context_uri and context_uri != playlist_uri and track_set:
                 add_log(account_id, "Context changed (autoplay detected), advancing")
                 break
 
             # Case 1c: Context gone (null context = autoplay radio)
-            if context is None and is_playing and len(seen_track_uris) > 1:
+            # Require at least 3 unique tracks before trusting context loss
+            if context is None and is_playing and len(seen_track_uris) > 3:
                 add_log(account_id, "Context lost (autoplay radio), advancing")
                 break
 
