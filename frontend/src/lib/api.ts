@@ -1,26 +1,32 @@
 export function getApiBase(): string {
-  // 1. Explicitly set env var (for Oracle / Railway / Render production)
+  // 1. BROWSER DETECTION FIRST — env vars get baked at Docker build time
+  //    so they are unreliable in Codespaces. Check the live URL instead.
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    const origin = window.location.origin;
+
+    // GitHub Codespaces: swap port 3000 → 5000
+    if (host.includes(".app.github.dev")) {
+      const base = origin.replace("-3000.", "-5000.");
+      console.log("[Fleet Sentinel] Codespace detected → API:", base);
+      return base;
+    }
+
+    // Any non-localhost host (Oracle / VPS): use same host on port 5000
+    if (host !== "localhost" && host !== "127.0.0.1") {
+      const base = `${window.location.protocol}//${host}:5000`;
+      console.log("[Fleet Sentinel] Remote host detected → API:", base);
+      return base;
+    }
+  }
+
+  // 2. Explicit env var (only if NOT the default localhost value)
   const envUrl = process.env.NEXT_PUBLIC_API_URL;
   if (envUrl && envUrl !== "http://localhost:5000" && envUrl !== "") {
     return envUrl;
   }
 
-  // 2. GitHub Codespaces: swap port 3000 → 5000 in the forwarded URL
-  //    (runs client-side only, window is available here when called from api())
-  if (typeof window !== "undefined") {
-    const host = window.location.hostname;
-    if (host.includes(".app.github.dev")) {
-      return window.location.origin.replace("-3000.", "-5000.");
-    }
-    // 3. Same server, different port (Oracle / VPS running both services)
-    //    If the hostname is not localhost and no env var set, try port 5000
-    if (host !== "localhost" && host !== "127.0.0.1") {
-      const proto = window.location.protocol;
-      return `${proto}//${host}:5000`;
-    }
-  }
-
-  // 4. Local dev fallback
+  // 3. Local dev fallback
   return "http://localhost:5000";
 }
 
