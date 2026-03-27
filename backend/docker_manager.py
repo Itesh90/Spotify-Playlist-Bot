@@ -49,9 +49,12 @@ def _get_free_vnc_port() -> int | None:
     """Find the first unused port in the VNC range (6081-6200)."""
     try:
         client = _client()
-        # Check which ports are already bound by running containers
+        # Only check ports bound by spb_worker_ containers (not the backend itself)
         used_ports = set()
         for container in client.containers.list(all=True):
+            name = container.name.lstrip("/")
+            if not name.startswith("spb_worker_"):
+                continue  # Skip non-worker containers
             ports = container.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
             for bindings in ports.values():
                 if bindings:
