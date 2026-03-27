@@ -69,7 +69,12 @@ def _launch_browser(playwright, headless: bool) -> tuple[Browser, BrowserContext
 
     if INTERACTIVE:
         # Firefox for interactive — better compatibility with Spotify login UI
-        browser = playwright.firefox.launch(headless=False)
+        # Must pass args for Docker compatibility (no-sandbox etc.)
+        firefox_kwargs = {"headless": False}
+        if proxy:
+            firefox_kwargs["proxy"] = proxy
+        # Firefox uses MOZ_ env vars for some settings
+        browser = playwright.firefox.launch(**firefox_kwargs)
         log.info(f"Worker {ACCOUNT_ID}: Firefox launched in INTERACTIVE mode.")
     else:
         browser = playwright.chromium.launch(**launch_kwargs)
@@ -120,21 +125,30 @@ def _start_vnc_services() -> list[subprocess.Popen]:
     # 1. Start Xvfb on display :99
     xvfb = subprocess.Popen(
         ["Xvfb", ":99", "-screen", "0", "1280x800x24"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
     procs.append(xvfb)
     os.environ["DISPLAY"] = ":99"
-    time.sleep(1)  # Wait for Xvfb to initialize
+    time.sleep(2)  # Wait for Xvfb to fully initialize (Codespaces can be slow)
+    # Verify Xvfb is still alive
+    if xvfb.poll() is not None:
+        stderr = xvfb.stderr.read().decode() if xvfb.stderr else ""
+        log.error(f"Worker {ACCOUNT_ID}: Xvfb CRASHED on startup! stderr: {stderr}")
+        return procs
     log.info(f"Worker {ACCOUNT_ID}: Xvfb started on :99")
 
     # 2. Start x11vnc — captures the Xvfb display
     x11vnc = subprocess.Popen(
         ["x11vnc", "-display", ":99", "-nopw", "-listen", "0.0.0.0",
          "-xkb", "-forever", "-quiet", "-rfbport", "5900"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
     procs.append(x11vnc)
-    time.sleep(0.5)
+    time.sleep(1)
+    if x11vnc.poll() is not None:
+        stderr = x11vnc.stderr.read().decode() if x11vnc.stderr else ""
+        log.error(f"Worker {ACCOUNT_ID}: x11vnc CRASHED! stderr: {stderr}")
+        return procs
     log.info(f"Worker {ACCOUNT_ID}: x11vnc started on port 5900")
 
     # 3. Start websockify — bridges WebSocket (6080) → VNC (5900)

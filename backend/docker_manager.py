@@ -144,26 +144,35 @@ def stop_worker(account_id: str) -> str | None:
     Stop and remove the worker container for the given account.
     Returns None on success, error string on failure.
     """
+    # Stop main worker container
     try:
         c = _client().containers.get(_container_name(account_id))
         c.stop(timeout=10)
+        try:
+            c.remove(force=True)
+        except Exception:
+            pass
         log.info(f"Worker stopped: {_container_name(account_id)}")
-        # Clean up VNC port tracking
-        _active_vnc_ports.pop(account_id, None)
-        return None
     except NotFound:
-        _active_vnc_ports.pop(account_id, None)
-        return None              # Already gone — not an error
+        pass              # Already gone — not an error
     except APIError as e:
         log.error(f"Failed to stop worker {account_id}: {e}")
         return str(e)
 
-    # Also try to stop any setup container
+    # Also stop any setup container
     try:
         c = _client().containers.get(_container_name(account_id) + "_setup")
-        c.stop(timeout=10)
+        c.stop(timeout=5)
+        try:
+            c.remove(force=True)
+        except Exception:
+            pass
     except (NotFound, APIError):
         pass
+
+    # Clean up VNC port tracking
+    _active_vnc_ports.pop(account_id, None)
+    return None
 
 
 def get_logs(account_id: str, tail: int = 50) -> list[str]:
@@ -218,10 +227,11 @@ def setup_login(account_id: str, proxy_url: str = "") -> tuple[str | None, int |
 
         container_name = _container_name(account_id) + "_setup"
 
-        # Also stop any previous setup container with same name
+        # Also stop and remove any previous setup container with same name
         try:
             old = client.containers.get(container_name)
             old.stop(timeout=5)
+            old.remove(force=True)
         except (NotFound, APIError):
             pass
 
@@ -229,7 +239,7 @@ def setup_login(account_id: str, proxy_url: str = "") -> tuple[str | None, int |
             image=WORKER_IMAGE,
             name=container_name,
             detach=True,
-            remove=True,
+            remove=False,                       # Keep container for log inspection
             environment=env,
             volumes={
                 host_data_dir: {
