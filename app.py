@@ -36,17 +36,29 @@ def _is_origin_allowed(origin: str) -> bool:
         return True
     return False
 
+@app.before_request
+def _handle_preflight():
+    """Intercept OPTIONS preflight BEFORE routing — prevents 405 on routes that lack OPTIONS."""
+    if request.method == "OPTIONS":
+        origin = request.headers.get("Origin", "")
+        if _is_origin_allowed(origin):
+            resp = app.make_default_options_response()
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            resp.headers["Access-Control-Max-Age"] = "3600"
+            return resp
+
 @app.after_request
 def _cors_headers(response):
+    """Add CORS headers to ALL responses (non-preflight)."""
     origin = request.headers.get("Origin", "")
     if _is_origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    # Handle preflight
-    if request.method == "OPTIONS":
-        response.status_code = 200
     return response
 
 # Ensure all session cookies work across the port-forwarded domain
