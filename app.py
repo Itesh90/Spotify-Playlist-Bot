@@ -22,11 +22,17 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
 app.config["SESSION_PERMANENT"] = True
 
 # 🚀 Robust CORS for Codespaces (Allow any *.app.github.dev subdomain)
-CORS(app, supports_credentials=True, origins=[
-    re.compile(r"^https?://.*\.app\.github\.dev$"), # GitHub Codespaces
-    "http://localhost:3000",                       # Local Dev
-    os.environ.get("FRONTEND_URL", "")             # Production (if set)
-])
+_cors_origins = [
+    r"https?://.*\.app\.github\.dev",  # GitHub Codespaces (string regex, not compiled)
+    "http://localhost:3000",            # Local Dev
+]
+if os.environ.get("FRONTEND_URL"):     # Only add if actually set
+    _cors_origins.append(os.environ["FRONTEND_URL"])
+
+CORS(app, supports_credentials=True,
+     origins=_cors_origins,
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
 # Ensure all session cookies work across the port-forwarded domain
 app.config.update(
