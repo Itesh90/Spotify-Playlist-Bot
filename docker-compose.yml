@@ -18,8 +18,8 @@ services:
       - "5000:5000"
     environment:
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
-      - BASE_URL=${BASE_URL:-http://localhost:5000}
-      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - BASE_URL=${BASE_URL:-https://literate-yodel-x554qrxgj5qvfvvj6-3000.app.github.dev}
+      - FRONTEND_URL=${FRONTEND_URL:-https://literate-yodel-x554qrxgj5qvfvvj6-3000.app.github.dev}
       - WORKER_IMAGE=spb_worker:latest        # image used to spawn worker containers
       - DATA_DIR=/app/data
       - HOST_STORAGE_PATH=/app/storage/accounts
