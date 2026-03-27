@@ -511,19 +511,41 @@ export default function Dashboard() {
                 </button>
               </div>
 
-              {/* noVNC iframe */}
-              <div className="flex-1 bg-black min-h-[600px]">
+              {/* noVNC Browser */}
+              <div className="flex-1 bg-black min-h-[600px] relative">
+                {/* Try iframe first — works on Oracle/self-hosted, blocked in Codespaces */}
                 <iframe
                   src={setupModal.vncUrl}
                   className="w-full h-full min-h-[600px] border-0"
                   allow="clipboard-write; clipboard-read"
                   title={`VNC Setup - ${setupModal.accountName}`}
                 />
+                {/* Fallback overlay — always visible with helpful link */}
+                <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/90 to-transparent">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-white/50">
+                      Black screen? The browser is running — open it in a new tab below.
+                    </p>
+                    <a
+                      href={setupModal.vncUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-2 rounded-xl text-sm font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 transition-all whitespace-nowrap"
+                    >
+                      🌐 Open Browser in New Tab
+                    </a>
+                  </div>
+                </div>
               </div>
 
               {/* Modal Footer */}
               <div className="flex items-center justify-between p-3 border-t border-white/10 bg-black/40">
-                <span className="text-xs text-white/30 font-mono">VNC Port: {setupModal.vncPort ?? 'N/A'} | Auto-detect active</span>
+                <div className="flex items-center gap-4">
+                  <span className="text-xs text-white/30 font-mono">VNC Port: {setupModal.vncPort ?? 'N/A'} | Auto-detect active</span>
+                  <span className="text-xs text-white/20">
+                    ℹ️ Codespaces: make port {setupModal.vncPort} <strong className="text-yellow-400">Public</strong> in the Ports tab
+                  </span>
+                </div>
                 <button
                   onClick={() => setSetupModal(null)}
                   className="px-4 py-2 rounded-xl text-sm font-bold bg-brand-pink/20 text-brand-pink border border-brand-pink/40 hover:bg-brand-pink/30 transition-all"
