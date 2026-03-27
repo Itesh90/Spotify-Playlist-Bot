@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Play, Square, Plus, Trash2, ExternalLink, RefreshCw, Terminal, MonitorSmartphone, Globe, Cpu, Activity, Info, RotateCcw, ShieldCheck, Monitor, X } from "lucide-react";
+import { Play, Square, Plus, Trash2, RefreshCw, Terminal, MonitorSmartphone, Globe, Cpu, Activity, RotateCcw, ShieldCheck, Monitor } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api, getApiBase } from "@/lib/api";
 
@@ -474,145 +474,32 @@ export default function Dashboard() {
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0, 242, 254, 0.5); }
       `}} />
 
-      {/* ── Screenshot-Based Setup Modal ─────────────────────────────── */}
+      {/* ── Setup Status Toast ───────────────────────────────────────── */}
       <AnimatePresence>
         {setupModal && (
           <motion.div
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-            onClick={() => setSetupModal(null)}
+            initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 40 }}
+            className="fixed bottom-6 right-6 z-50 bg-[#111] border border-brand-purple/40 rounded-2xl p-5 shadow-[0_0_40px_rgba(139,92,246,0.2)] max-w-sm w-full"
           >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-[#111] border border-white/10 rounded-2xl overflow-hidden shadow-[0_0_60px_rgba(0,242,254,0.15)] w-full max-w-[1400px] max-h-[90vh] flex flex-col"
-              onClick={(e) => e.stopPropagation()}
-            >
-              {/* Modal Header */}
-              <div className="flex items-center justify-between p-4 border-b border-white/10 bg-black/40">
-                <div className="flex items-center gap-3">
-                  <Monitor className="text-brand-purple" size={20} />
-                  <div>
-                    <h3 className="text-lg font-bold text-white">Setting up <span className="text-brand-cyan">{setupModal.accountName}</span></h3>
-                    <p className="text-xs text-white/40 font-mono">
-                      {setupStatus === "done" ? (
-                        <span className="text-green-400">✅ Login detected! Session saved. Starting headless bot...</span>
-                      ) : (
-                        <span className="animate-pulse">⏳ Click on the browser below to interact — type your credentials to log in</span>
-                      )}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => setSetupModal(null)}
-                  className="p-2 rounded-lg hover:bg-white/10 transition-colors text-white/40 hover:text-white"
-                >
-                  <X size={20} />
-                </button>
+            <div className="flex items-center gap-3 mb-3">
+              <Monitor className="text-brand-purple" size={18} />
+              <div>
+                <p className="text-sm font-bold text-white">Setting up <span className="text-brand-cyan">{setupModal.accountName}</span></p>
+                {setupStatus === "done" ? (
+                  <p className="text-xs text-green-400 mt-0.5">✅ Login detected! Session saved.</p>
+                ) : (
+                  <p className="text-xs text-white/40 animate-pulse mt-0.5">⏳ Open the VNC tab and log in to Spotify...</p>
+                )}
               </div>
-
-              {/* Screenshot-based remote browser */}
-              <div className="flex-1 bg-black min-h-[600px] relative flex flex-col">
-                {/* Live screenshot — click to interact */}
-                <img
-                  src={`${API_BASE}/api/v2/screen/${setupModal.accountId}?t=${Date.now()}`}
-                  alt="Remote browser"
-                  className="w-full cursor-crosshair"
-                  style={{ imageRendering: "auto", maxHeight: "600px", objectFit: "contain" }}
-                  onClick={(e) => {
-                    const rect = (e.target as HTMLImageElement).getBoundingClientRect();
-                    const img = e.target as HTMLImageElement;
-                    const scaleX = img.naturalWidth / rect.width;
-                    const scaleY = img.naturalHeight / rect.height;
-                    const x = Math.round((e.clientX - rect.left) * scaleX);
-                    const y = Math.round((e.clientY - rect.top) * scaleY);
-                    api(`/api/v2/input/${setupModal.accountId}`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ type: "click", x, y }),
-                    }).catch(() => { });
-                  }}
-                  ref={(img) => {
-                    if (!img) return;
-                    // Auto-refresh screenshot every 500ms
-                    const timer = setInterval(() => {
-                      if (!setupModal) { clearInterval(timer); return; }
-                      img.src = `${API_BASE}/api/v2/screen/${setupModal.accountId}?t=${Date.now()}`;
-                    }, 500);
-                    (img as any).__timer = timer;
-                    img.addEventListener("error", () => {
-                      // Screenshot not ready yet — show placeholder
-                    });
-                    // Cleanup on unmount (will be called on re-render)
-                    return () => clearInterval(timer);
-                  }}
-                />
-
-                {/* Typing input bar */}
-                <div className="flex items-center gap-2 p-3 bg-black/60 border-t border-white/10">
-                  <input
-                    type="text"
-                    placeholder="Type here, then press Enter to send to browser..."
-                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/30 outline-none focus:border-brand-cyan/50"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        const input = e.target as HTMLInputElement;
-                        const text = input.value;
-                        if (text) {
-                          api(`/api/v2/input/${setupModal.accountId}`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ type: "type", text }),
-                          }).catch(() => { });
-                          input.value = "";
-                        }
-                      } else if (e.key === "Tab") {
-                        e.preventDefault();
-                        api(`/api/v2/input/${setupModal.accountId}`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ type: "key", key: "Tab" }),
-                        }).catch(() => { });
-                      }
-                    }}
-                  />
-                  <button
-                    onClick={() => {
-                      api(`/api/v2/input/${setupModal.accountId}`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ type: "key", key: "Enter" }),
-                      }).catch(() => { });
-                    }}
-                    className="px-3 py-2 rounded-lg text-xs font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 transition-all"
-                  >
-                    Enter ↵
-                  </button>
-                  <button
-                    onClick={() => {
-                      api(`/api/v2/input/${setupModal.accountId}`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ type: "key", key: "Tab" }),
-                      }).catch(() => { });
-                    }}
-                    className="px-3 py-2 rounded-lg text-xs font-bold bg-white/10 text-white/60 border border-white/20 hover:bg-white/20 transition-all"
-                  >
-                    Tab ⇥
-                  </button>
-                </div>
-              </div>
-
-              {/* Modal Footer */}
-              <div className="flex items-center justify-between p-3 border-t border-white/10 bg-black/40">
-                <span className="text-xs text-white/30 font-mono">Screenshot mode | Click on the image to interact | Auto-detect active</span>
-                <button
-                  onClick={() => setSetupModal(null)}
-                  className="px-4 py-2 rounded-xl text-sm font-bold bg-brand-pink/20 text-brand-pink border border-brand-pink/40 hover:bg-brand-pink/30 transition-all"
-                >
-                  Cancel Setup
-                </button>
-              </div>
-            </motion.div>
+            </div>
+            {setupStatus !== "done" && (
+              <button
+                onClick={() => setSetupModal(null)}
+                className="w-full px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 text-white/40 border border-white/10 hover:bg-white/10 transition-all"
+              >
+                Dismiss
+              </button>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
