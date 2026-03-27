@@ -40,7 +40,10 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:5000
+      # Do NOT set NEXT_PUBLIC_API_URL here — it gets baked into the JS bundle at build time.
+      # For Codespaces: auto-detected at runtime via window.location.hostname
+      # For Oracle/Production: set via build arg (see below) or frontend/.env.local
+      - NODE_ENV=production
     depends_on:
       - backend
     networks:

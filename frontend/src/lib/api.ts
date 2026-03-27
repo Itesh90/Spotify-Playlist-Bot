@@ -1,16 +1,28 @@
 export function getApiBase(): string {
-  // If explicitly set via env, use it
-  if (process.env.NEXT_PUBLIC_API_URL && process.env.NEXT_PUBLIC_API_URL !== "http://localhost:5000") {
-    return process.env.NEXT_PUBLIC_API_URL;
+  // 1. Explicitly set env var (for Oracle / Railway / Render production)
+  const envUrl = process.env.NEXT_PUBLIC_API_URL;
+  if (envUrl && envUrl !== "http://localhost:5000" && envUrl !== "") {
+    return envUrl;
   }
-  // Auto-detect GitHub Codespaces: swap port 3000 → 5000 in the URL
-  if (typeof window !== "undefined" && window.location.hostname.includes(".app.github.dev")) {
-    return window.location.origin.replace("-3000.", "-5000.");
-  }
-  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
-}
 
-const API_BASE = getApiBase();
+  // 2. GitHub Codespaces: swap port 3000 → 5000 in the forwarded URL
+  //    (runs client-side only, window is available here when called from api())
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host.includes(".app.github.dev")) {
+      return window.location.origin.replace("-3000.", "-5000.");
+    }
+    // 3. Same server, different port (Oracle / VPS running both services)
+    //    If the hostname is not localhost and no env var set, try port 5000
+    if (host !== "localhost" && host !== "127.0.0.1") {
+      const proto = window.location.protocol;
+      return `${proto}//${host}:5000`;
+    }
+  }
+
+  // 4. Local dev fallback
+  return "http://localhost:5000";
+}
 
 type FetchOptions = {
   method?: string;
@@ -18,7 +30,9 @@ type FetchOptions = {
 };
 
 export async function api<T = unknown>(path: string, opts: FetchOptions = {}): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  // Call getApiBase() here (per-request) so it runs on the client with window available
+  const base = getApiBase();
+  const res = await fetch(`${base}${path}`, {
     method: opts.method || "GET",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
