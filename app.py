@@ -1135,22 +1135,32 @@ def api_v2_setup(account_id):
     if err:
         return jsonify({"error": err}), 500
 
-    # Build VNC URL — auto-detect from request Host header
+    # Build VNC URL — use FRONTEND_URL env var (already set in docker-compose.yml)
+    # Flask runs inside Docker so request.Host = 'backend:5000' (internal), not the public URL.
     vnc_host_override = os.environ.get("VNC_HOST", "")
-    request_host = request.headers.get("Host", "localhost:5000")
+    frontend_url = os.environ.get("FRONTEND_URL", "")    # e.g. https://xxx-3000.app.github.dev
 
     if vnc_host_override:
-        # Manual override via env var
+        # Explicit manual override — highest priority
         vnc_url = f"https://{vnc_host_override.replace('-3000.', f'-{vnc_port}.')}/vnc.html?autoconnect=true&resize=scale"
-    elif ".app.github.dev" in request_host:
-        # GitHub Codespaces — replace port in the forwarded hostname
+
+    elif frontend_url and ".app.github.dev" in frontend_url:
+        # GitHub Codespaces — FRONTEND_URL is https://xxx-3000.app.github.dev
+        # Replace the -3000 port segment with the assigned VNC port
         import re
-        vnc_host = re.sub(r"-\d+\.", f"-{vnc_port}.", request_host)
-        vnc_url = f"https://{vnc_host}/vnc.html?autoconnect=true&resize=scale"
-    else:
-        # Oracle / Local — direct IP:port access
-        server_ip = request_host.split(":")[0]
+        vnc_url_base = re.sub(r"-\d+\.app\.github\.dev", f"-{vnc_port}.app.github.dev", frontend_url)
+        vnc_url = f"{vnc_url_base}/vnc.html?autoconnect=true&resize=scale"
+
+    elif frontend_url:
+        # Oracle / self-hosted — FRONTEND_URL is http://IP:3000 or https://domain
+        # Use server IP with direct VNC port
+        import re
+        server_ip = re.sub(r"https?://", "", frontend_url).split(":")[0].split("/")[0]
         vnc_url = f"http://{server_ip}:{vnc_port}/vnc.html?autoconnect=true&resize=scale"
+
+    else:
+        # Last resort fallback (local dev)
+        vnc_url = f"http://localhost:{vnc_port}/vnc.html?autoconnect=true&resize=scale"
 
     set_status(account_id, "setup")
     add_log(account_id, "Interactive setup started — log in to Spotify in the embedded browser")

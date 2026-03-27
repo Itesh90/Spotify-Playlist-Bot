@@ -54,6 +54,7 @@ export default function Dashboard() {
     accountId: string;
     accountName: string;
     vncUrl: string;
+    vncPort: number | null;
   } | null>(null);
   const [setupStatus, setSetupStatus] = useState<string>("");
 
@@ -168,7 +169,7 @@ export default function Dashboard() {
     try {
       const d = await api<{ok: boolean; vnc_url: string; port: number}>(`/api/v2/setup/${id}`, { method: "POST" });
       if (d.vnc_url) {
-        setSetupModal({ accountId: id, accountName, vncUrl: d.vnc_url });
+        setSetupModal({ accountId: id, accountName, vncUrl: d.vnc_url, vncPort: d.port || null });
         setSetupStatus("waiting");
       } else {
         alert("Setup started but no VNC URL returned. Check Docker logs.");
@@ -522,7 +523,7 @@ export default function Dashboard() {
 
               {/* Modal Footer */}
               <div className="flex items-center justify-between p-3 border-t border-white/10 bg-black/40">
-                <span className="text-xs text-white/30 font-mono">Port: {setupModal.vncUrl.match(/-(\d+)\./)?.[1] || 'N/A'} | Auto-detect active</span>
+                <span className="text-xs text-white/30 font-mono">VNC Port: {setupModal.vncPort ?? 'N/A'} | Auto-detect active</span>
                 <button
                   onClick={() => setSetupModal(null)}
                   className="px-4 py-2 rounded-xl text-sm font-bold bg-brand-pink/20 text-brand-pink border border-brand-pink/40 hover:bg-brand-pink/30 transition-all"
