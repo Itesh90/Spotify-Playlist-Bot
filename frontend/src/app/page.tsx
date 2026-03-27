@@ -53,8 +53,6 @@ export default function Dashboard() {
   const [setupModal, setSetupModal] = useState<{
     accountId: string;
     accountName: string;
-    vncUrl: string;
-    vncPort: number | null;
   } | null>(null);
   const [setupStatus, setSetupStatus] = useState<string>("");
 
@@ -113,7 +111,7 @@ export default function Dashboard() {
                 if (c[i]) c[i].live_logs = data.logs;
                 return c;
               });
-            } catch {}
+            } catch { }
           }
         });
         return next;
@@ -167,12 +165,12 @@ export default function Dashboard() {
 
   async function setupLogin(id: string, accountName: string) {
     try {
-      const d = await api<{ok: boolean; vnc_url: string; port: number}>(`/api/v2/setup/${id}`, { method: "POST" });
-      if (d.vnc_url) {
-        setSetupModal({ accountId: id, accountName, vncUrl: d.vnc_url, vncPort: d.port || null });
+      const d = await api<{ ok: boolean; mode: string }>(`/api/v2/setup/${id}`, { method: "POST" });
+      if (d.ok) {
+        setSetupModal({ accountId: id, accountName });
         setSetupStatus("waiting");
       } else {
-        alert("Setup started but no VNC URL returned. Check Docker logs.");
+        alert("Setup failed. Check Docker logs.");
       }
       fetchAccounts();
     } catch (err: any) {
@@ -185,7 +183,7 @@ export default function Dashboard() {
     if (!setupModal) return;
     const interval = setInterval(async () => {
       try {
-        const d = await api<{status: string; spotify_user?: string}>(`/api/v2/session_status/${setupModal.accountId}`);
+        const d = await api<{ status: string; spotify_user?: string }>(`/api/v2/session_status/${setupModal.accountId}`);
         if (d.status === "done") {
           setSetupStatus("done");
           setTimeout(() => {
@@ -195,7 +193,7 @@ export default function Dashboard() {
           }, 2000);
           clearInterval(interval);
         }
-      } catch {}
+      } catch { }
     }, 3000);
     return () => clearInterval(interval);
   }, [setupModal, fetchAccounts]);
@@ -203,7 +201,7 @@ export default function Dashboard() {
   async function stopAllNodes() {
     for (const acc of accounts) {
       if (acc.container_running || acc.status !== "idle") {
-        await api(`/api/v2/stop/${acc.id}`, { method: "POST" }).catch(()=>{});
+        await api(`/api/v2/stop/${acc.id}`, { method: "POST" }).catch(() => { });
       }
     }
     fetchAccounts();
@@ -227,7 +225,7 @@ export default function Dashboard() {
 
   async function reauthorize(id: string) {
     try {
-      const data = await api<{ok: boolean; auth_url: string}>(`/api/reauthorize/${id}`, { method: "POST" });
+      const data = await api<{ ok: boolean; auth_url: string }>(`/api/reauthorize/${id}`, { method: "POST" });
       if (data.auth_url) {
         window.open(data.auth_url, "_blank");
       }
@@ -248,7 +246,7 @@ export default function Dashboard() {
   return (
     <main className="min-h-screen relative z-10 p-4 md:p-8 max-w-7xl mx-auto">
       {/* Header */}
-      <motion.header 
+      <motion.header
         initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
         className="glass-panel flex flex-col md:flex-row items-center justify-between p-6 rounded-2xl mb-8 gap-4 border-b-2 border-b-brand-cyan/30"
       >
@@ -265,7 +263,7 @@ export default function Dashboard() {
           <button onClick={() => router.push("/mainframe")} className="px-4 py-2 rounded-xl text-sm font-semibold border border-brand-cyan/50 text-brand-cyan hover:bg-brand-cyan/10 transition-all flex items-center gap-2">
             <MonitorSmartphone size={16} /> Open Mainframe
           </button>
-          <button onClick={() => api("/api/logout", { method: "POST" }).then(()=>router.push("/login"))} className="px-4 py-2 rounded-xl text-sm font-semibold bg-white/5 border border-white/10 hover:border-white/30 transition-all">Logout</button>
+          <button onClick={() => api("/api/logout", { method: "POST" }).then(() => router.push("/login"))} className="px-4 py-2 rounded-xl text-sm font-semibold bg-white/5 border border-white/10 hover:border-white/30 transition-all">Logout</button>
           <button onClick={stopAllNodes} className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold text-white shadow-[0_0_15px_rgba(255,0,127,0.4)] bg-gradient-to-r from-brand-pink to-brand-purple hover:scale-105 transition-all">
             <Square size={16} fill="currentColor" /> Global Kill
           </button>
@@ -273,7 +271,7 @@ export default function Dashboard() {
       </motion.header>
 
       {/* Node Registration */}
-      <motion.section 
+      <motion.section
         initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}
         className="glass-panel p-6 rounded-2xl mb-8 relative overflow-hidden"
       >
@@ -314,10 +312,10 @@ export default function Dashboard() {
             {accounts.map((acc, idx) => {
               const isActive = acc.container_running || acc.status === "playing";
               const isError = acc.status === "error";
-              
+
               return (
-                <motion.div 
-                  key={acc.id} 
+                <motion.div
+                  key={acc.id}
                   initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} transition={{ delay: idx * 0.05 }}
                   className={`glass-panel rounded-2xl overflow-hidden border-2 transition-colors duration-500 ${isActive ? 'border-brand-cyan/40 shadow-[0_0_30px_rgba(0,242,254,0.1)]' : isError ? 'border-brand-pink/40 shadow-[0_0_30px_rgba(255,0,127,0.1)]' : 'border-white/5'}`}
                 >
@@ -335,7 +333,7 @@ export default function Dashboard() {
                       )}
                       <div className="flex gap-2">
                         <span className="px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-[10px] uppercase font-mono tracking-wider text-brand-purple flex items-center gap-1">
-                          <Cpu size={10} /> Node-{idx+1}
+                          <Cpu size={10} /> Node-{idx + 1}
                         </span>
                         {acc.docker_available && (
                           <span className="px-2 py-0.5 rounded-md bg-blue-500/10 border border-blue-500/20 text-[10px] uppercase font-mono text-blue-400">Docker API</span>
@@ -352,12 +350,12 @@ export default function Dashboard() {
                         <span className="text-xs uppercase tracking-widest text-white/50 font-semibold">Engine State</span>
                         <span className={`text-xs font-mono uppercase ${isActive ? 'text-brand-cyan' : 'text-white/40'}`}>{acc.status}</span>
                       </div>
-                      
+
                       <div className="flex flex-col gap-2">
                         {!acc.authorized && (
                           <a href={`${API_BASE}/authorize/${acc.id}`} className="w-full text-center px-4 py-2 rounded-xl text-sm font-bold bg-yellow-500/20 text-yellow-300 border border-yellow-500/40 hover:bg-yellow-500/30 transition-all shadow-[0_0_15px_rgba(234,179,8,0.2)]">1. OAuth Auth</a>
                         )}
-                        
+
                         {!isActive ? (
                           <>
                             <div className="flex gap-2">
@@ -468,14 +466,15 @@ export default function Dashboard() {
       )}
 
       {/* Global CSS overrides inside component for convenience if globals.css doesn't have custom-scrollbar */}
-      <style dangerouslySetInnerHTML={{__html: `
+      <style dangerouslySetInnerHTML={{
+        __html: `
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0, 242, 254, 0.5); }
       `}} />
 
-      {/* ── VNC Setup Modal ─────────────────────────────────────────────── */}
+      {/* ── Screenshot-Based Setup Modal ─────────────────────────────── */}
       <AnimatePresence>
         {setupModal && (
           <motion.div
@@ -498,7 +497,7 @@ export default function Dashboard() {
                       {setupStatus === "done" ? (
                         <span className="text-green-400">✅ Login detected! Session saved. Starting headless bot...</span>
                       ) : (
-                        <span className="animate-pulse">⏳ Waiting for Spotify login...</span>
+                        <span className="animate-pulse">⏳ Click on the browser below to interact — type your credentials to log in</span>
                       )}
                     </p>
                   </div>
@@ -511,41 +510,101 @@ export default function Dashboard() {
                 </button>
               </div>
 
-              {/* noVNC Browser */}
-              <div className="flex-1 bg-black min-h-[600px] relative">
-                {/* Try iframe first — works on Oracle/self-hosted, blocked in Codespaces */}
-                <iframe
-                  src={setupModal.vncUrl}
-                  className="w-full h-full min-h-[600px] border-0"
-                  allow="clipboard-write; clipboard-read"
-                  title={`VNC Setup - ${setupModal.accountName}`}
+              {/* Screenshot-based remote browser */}
+              <div className="flex-1 bg-black min-h-[600px] relative flex flex-col">
+                {/* Live screenshot — click to interact */}
+                <img
+                  src={`${API_BASE}/api/v2/screen/${setupModal.accountId}?t=${Date.now()}`}
+                  alt="Remote browser"
+                  className="w-full cursor-crosshair"
+                  style={{ imageRendering: "auto", maxHeight: "600px", objectFit: "contain" }}
+                  onClick={(e) => {
+                    const rect = (e.target as HTMLImageElement).getBoundingClientRect();
+                    const img = e.target as HTMLImageElement;
+                    const scaleX = img.naturalWidth / rect.width;
+                    const scaleY = img.naturalHeight / rect.height;
+                    const x = Math.round((e.clientX - rect.left) * scaleX);
+                    const y = Math.round((e.clientY - rect.top) * scaleY);
+                    api(`/api/v2/input/${setupModal.accountId}`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ type: "click", x, y }),
+                    }).catch(() => { });
+                  }}
+                  ref={(img) => {
+                    if (!img) return;
+                    // Auto-refresh screenshot every 500ms
+                    const timer = setInterval(() => {
+                      if (!setupModal) { clearInterval(timer); return; }
+                      img.src = `${API_BASE}/api/v2/screen/${setupModal.accountId}?t=${Date.now()}`;
+                    }, 500);
+                    (img as any).__timer = timer;
+                    img.addEventListener("error", () => {
+                      // Screenshot not ready yet — show placeholder
+                    });
+                    // Cleanup on unmount (will be called on re-render)
+                    return () => clearInterval(timer);
+                  }}
                 />
-                {/* Fallback overlay — always visible with helpful link */}
-                <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/90 to-transparent">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs text-white/50">
-                      Black screen? The browser is running — open it in a new tab below.
-                    </p>
-                    <a
-                      href={setupModal.vncUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-4 py-2 rounded-xl text-sm font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 transition-all whitespace-nowrap"
-                    >
-                      🌐 Open Browser in New Tab
-                    </a>
-                  </div>
+
+                {/* Typing input bar */}
+                <div className="flex items-center gap-2 p-3 bg-black/60 border-t border-white/10">
+                  <input
+                    type="text"
+                    placeholder="Type here, then press Enter to send to browser..."
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/30 outline-none focus:border-brand-cyan/50"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const input = e.target as HTMLInputElement;
+                        const text = input.value;
+                        if (text) {
+                          api(`/api/v2/input/${setupModal.accountId}`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ type: "type", text }),
+                          }).catch(() => { });
+                          input.value = "";
+                        }
+                      } else if (e.key === "Tab") {
+                        e.preventDefault();
+                        api(`/api/v2/input/${setupModal.accountId}`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ type: "key", key: "Tab" }),
+                        }).catch(() => { });
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      api(`/api/v2/input/${setupModal.accountId}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ type: "key", key: "Enter" }),
+                      }).catch(() => { });
+                    }}
+                    className="px-3 py-2 rounded-lg text-xs font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 transition-all"
+                  >
+                    Enter ↵
+                  </button>
+                  <button
+                    onClick={() => {
+                      api(`/api/v2/input/${setupModal.accountId}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ type: "key", key: "Tab" }),
+                      }).catch(() => { });
+                    }}
+                    className="px-3 py-2 rounded-lg text-xs font-bold bg-white/10 text-white/60 border border-white/20 hover:bg-white/20 transition-all"
+                  >
+                    Tab ⇥
+                  </button>
                 </div>
               </div>
 
               {/* Modal Footer */}
               <div className="flex items-center justify-between p-3 border-t border-white/10 bg-black/40">
-                <div className="flex items-center gap-4">
-                  <span className="text-xs text-white/30 font-mono">VNC Port: {setupModal.vncPort ?? 'N/A'} | Auto-detect active</span>
-                  <span className="text-xs text-white/20">
-                    ℹ️ Codespaces: make port {setupModal.vncPort} <strong className="text-yellow-400">Public</strong> in the Ports tab
-                  </span>
-                </div>
+                <span className="text-xs text-white/30 font-mono">Screenshot mode | Click on the image to interact | Auto-detect active</span>
                 <button
                   onClick={() => setSetupModal(null)}
                   className="px-4 py-2 rounded-xl text-sm font-bold bg-brand-pink/20 text-brand-pink border border-brand-pink/40 hover:bg-brand-pink/30 transition-all"

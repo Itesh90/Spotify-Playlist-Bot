@@ -142,7 +142,7 @@ def _start_vnc_services() -> list[subprocess.Popen]:
     #    With host networking, bind to localhost only (websockify connects locally).
     #    Binding to 0.0.0.0 would expose raw VNC to the entire VM.
     x11vnc = subprocess.Popen(
-        ["x11vnc", "-display", ":99", "-nopw", "-listen", "localhost",
+        ["x11vnc", "-display", ":99", "-nopw", "-localhost",
          "-xkb", "-forever", "-quiet", "-rfbport", "5900"],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
