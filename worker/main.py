@@ -152,13 +152,8 @@ def _start_vnc_services() -> list[subprocess.Popen]:
     log.info(f"Worker {ACCOUNT_ID}: x11vnc started on port 5900")
 
     # 3. Start websockify — bridges WebSocket (6080) → VNC (5900)
-    #    On Ubuntu Jammy, novnc apt package installs HTML to /usr/share/novnc/web/
-    #    (not directly to /usr/share/novnc/)
-    novnc_web = "/usr/share/novnc/web"
-    if not os.path.isdir(novnc_web):
-        novnc_web = "/usr/share/novnc"      # older packages fallback
-    if not os.path.isdir(novnc_web):
-        novnc_web = "/usr/share/novnc/utils/launch.sh".replace("/utils/launch.sh", "")  # last resort
+    #    noVNC downloaded from GitHub to /opt/novnc in the Dockerfile.
+    novnc_web = "/opt/novnc"
     websockify = subprocess.Popen(
         ["websockify", "0.0.0.0:6080", "localhost:5900", "--web", novnc_web],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL

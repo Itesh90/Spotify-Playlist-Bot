@@ -18,21 +18,15 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     dnsutils \
     xvfb \
     x11vnc \
-    novnc \
     websockify \
     && rm -rf /var/lib/apt/lists/*
 
-# ── noVNC path fixup ─────────────────────────────────────────────────────────
-# On Ubuntu Jammy, novnc installs to /usr/share/novnc/web/ but websockify
-# expects to serve from a single directory. Create a symlink so vnc.html
-# is accessible at the root regardless of which path we pass to websockify.
-RUN if [ -f /usr/share/novnc/web/vnc.html ] && [ ! -f /usr/share/novnc/vnc.html ]; then \
-        ln -s /usr/share/novnc/web/vnc.html /usr/share/novnc/vnc.html && \
-        ln -s /usr/share/novnc/web/core /usr/share/novnc/core && \
-        ln -s /usr/share/novnc/web/vendor /usr/share/novnc/vendor; \
-    fi && \
-    echo "=== noVNC install path ===" && \
-    find /usr/share/novnc -name "vnc.html" 2>/dev/null | head -5
+# ── noVNC from GitHub (apt package has no HTML files on this base image) ──────
+RUN curl -sL https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.tar.gz \
+    | tar xz -C /opt \
+    && mv /opt/noVNC-1.4.0 /opt/novnc \
+    && echo "=== noVNC files ===" \
+    && ls /opt/novnc/vnc.html /opt/novnc/vnc_lite.html
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 WORKDIR /app
