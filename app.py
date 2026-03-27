@@ -1142,25 +1142,25 @@ def api_v2_setup(account_id):
 
     if vnc_host_override:
         # Explicit manual override — highest priority
-        vnc_url = f"https://{vnc_host_override.replace('-3000.', f'-{vnc_port}.')}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"https://{vnc_host_override.replace('-3000.', f'-{vnc_port}.')}/vnc.html?autoconnect=true&resize=scale"
 
     elif frontend_url and ".app.github.dev" in frontend_url:
         # GitHub Codespaces — FRONTEND_URL is https://xxx-3000.app.github.dev
         # Replace the -3000 port segment with the assigned VNC port
         import re
         vnc_url_base = re.sub(r"-\d+\.app\.github\.dev", f"-{vnc_port}.app.github.dev", frontend_url)
-        vnc_url = f"{vnc_url_base}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"{vnc_url_base}/vnc.html?autoconnect=true&resize=scale"
 
     elif frontend_url:
         # Oracle / self-hosted — FRONTEND_URL is http://IP:3000 or https://domain
         # Use server IP with direct VNC port
         import re
         server_ip = re.sub(r"https?://", "", frontend_url).split(":")[0].split("/")[0]
-        vnc_url = f"http://{server_ip}:{vnc_port}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"http://{server_ip}:{vnc_port}/vnc.html?autoconnect=true&resize=scale"
 
     else:
         # Last resort fallback (local dev)
-        vnc_url = f"http://localhost:{vnc_port}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"http://localhost:{vnc_port}/vnc.html?autoconnect=true&resize=scale"
 
     set_status(account_id, "setup")
     add_log(account_id, "Interactive setup started — log in to Spotify in the embedded browser")
