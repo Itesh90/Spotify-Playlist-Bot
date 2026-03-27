@@ -1,4 +1,5 @@
 import os
+import logging
 import requests
 import re
 import json
@@ -281,7 +282,8 @@ def get_spotify(account: dict) -> spotipy.Spotify | None:
     if oauth.is_token_expired(token_info):
         try:
             token_info = oauth.refresh_access_token(token_info["refresh_token"])
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Token refresh failed for {account.get('id', '?')}: {e}")
             return None
     return spotipy.Spotify(auth=token_info["access_token"])
 
@@ -708,15 +710,16 @@ def run_bot(account_id: str):
 def _save_index(account_id: str, index: int):
     lock = bot_locks.get(account_id)
     if lock:
-        lock.acquire()
-    try:
+        with lock:
+            acc = load_account(account_id)
+            if acc:
+                acc["current_index"] = index
+                save_account(account_id, acc)
+    else:
         acc = load_account(account_id)
         if acc:
             acc["current_index"] = index
             save_account(account_id, acc)
-    finally:
-        if lock:
-            lock.release()
 
 
 def start_bot(account_id: str) -> str | None:

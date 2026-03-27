@@ -13,6 +13,7 @@ from playwright.sync_api import sync_playwright, Browser, BrowserContext
 ACCOUNT_ID    = os.environ.get("ACCOUNT_ID", "default")
 INTERACTIVE   = os.environ.get("INTERACTIVE", "0") == "1"
 PROXY_URL     = os.environ.get("PROXY_URL", "")           # e.g. http://user:pass@host:port
+VNC_PORT      = int(os.environ.get("VNC_PORT", "6080"))    # websockify listens on this (host network)
 DATA_DIR      = os.environ.get("DATA_DIR", "/app/data")
 SESSION_FILE  = os.path.join(DATA_DIR, "session.json")
 LOG_FILE      = os.path.join(DATA_DIR, "worker.log")
@@ -151,16 +152,17 @@ def _start_vnc_services() -> list[subprocess.Popen]:
         return procs
     log.info(f"Worker {ACCOUNT_ID}: x11vnc started on port 5900")
 
-    # 3. Start websockify — bridges WebSocket (6080) → VNC (5900)
+    # 3. Start websockify — bridges WebSocket (VNC_PORT) → VNC (5900)
+    #    With host networking, websockify binds directly to the VM port.
     #    noVNC downloaded from GitHub to /opt/novnc in the Dockerfile.
     novnc_web = "/opt/novnc"
     websockify = subprocess.Popen(
-        ["websockify", "0.0.0.0:6080", "localhost:5900", "--web", novnc_web],
+        ["websockify", f"0.0.0.0:{VNC_PORT}", "localhost:5900", "--web", novnc_web],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     procs.append(websockify)
     time.sleep(0.5)
-    log.info(f"Worker {ACCOUNT_ID}: websockify/noVNC started on port 6080 (web={novnc_web})")
+    log.info(f"Worker {ACCOUNT_ID}: websockify/noVNC started on port {VNC_PORT} (web={novnc_web})")
 
     return procs
 
@@ -263,15 +265,19 @@ def run_interactive_setup():
                 browser.close()
                 return
 
-            # Save cookies & localStorage
+            if not spotify_user:
+                log.warning(f"Worker {ACCOUNT_ID}: Login not detected after {max_polls * 2}s — session NOT saved.")
+                browser.close()
+                return
+
+            # Save cookies & localStorage (only after confirmed login)
             context.storage_state(path=SESSION_FILE)
             log.info(f"Worker {ACCOUNT_ID}: Session saved → {SESSION_FILE}")
 
-            if spotify_user:
-                log.info(f"Worker {ACCOUNT_ID}: Spotify user: {spotify_user}")
-                user_file = os.path.join(DATA_DIR, "spotify_user.txt")
-                with open(user_file, "w") as f:
-                    f.write(spotify_user)
+            log.info(f"Worker {ACCOUNT_ID}: Spotify user: {spotify_user}")
+            user_file = os.path.join(DATA_DIR, "spotify_user.txt")
+            with open(user_file, "w") as f:
+                f.write(spotify_user)
 
             # Write the .setup_done flag so the backend knows we're finished
             done_flag = os.path.join(DATA_DIR, ".setup_done")

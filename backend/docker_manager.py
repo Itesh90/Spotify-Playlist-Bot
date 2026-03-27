@@ -116,7 +116,7 @@ def start_worker(account_id: str, proxy_url: str = "") -> str | None:
             image=WORKER_IMAGE,
             name=_container_name(account_id),
             detach=True,
-            remove=True,                        # auto-remove on exit
+            remove=False,                       # keep for log inspection; stop_worker handles cleanup
             environment=env,
             volumes={
                 host_data_dir: {
@@ -208,23 +208,24 @@ def setup_login(account_id: str, proxy_url: str = "") -> tuple[str | None, int |
     host_data_dir = os.path.join(HOST_STORAGE, account_id)
     os.makedirs(host_data_dir, exist_ok=True)
 
-    # Assign a free VNC port
-    vnc_port = _get_free_vnc_port()
-    if vnc_port is None:
-        return ("No free VNC ports available (all 6081-6200 in use)", None)
-
-    env = {
-        "ACCOUNT_ID": account_id,
-        "INTERACTIVE": "1",
-        "VNC_PORT": str(vnc_port),              # Worker binds websockify to this port directly
-    }
-    if proxy_url:
-        env["PROXY_URL"] = proxy_url
-
     try:
         client = _client()
-        # Stop any existing worker or setup container first
+        # Stop any existing worker or setup container first — must happen
+        # BEFORE allocating a VNC port so the old port is freed first.
         stop_worker(account_id)
+
+        # Assign a free VNC port (after cleanup so the old port is available)
+        vnc_port = _get_free_vnc_port()
+        if vnc_port is None:
+            return ("No free VNC ports available (all 6081-6200 in use)", None)
+
+        env = {
+            "ACCOUNT_ID": account_id,
+            "INTERACTIVE": "1",
+            "VNC_PORT": str(vnc_port),
+        }
+        if proxy_url:
+            env["PROXY_URL"] = proxy_url
 
         container_name = _container_name(account_id) + "_setup"
 
