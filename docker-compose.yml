@@ -16,6 +16,7 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
+      - "6081-6200:6081-6200"   # noVNC range for interactive browser login setup
     environment:
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
       - BASE_URL=${BASE_URL:-https://literate-yodel-x554qrxgj5qvfvvj6-3000.app.github.dev}

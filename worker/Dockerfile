@@ -16,6 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openvpn \
     curl \
     dnsutils \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ───────────────────────────────────────────────────────

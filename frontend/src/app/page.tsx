@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Play, Square, Plus, Trash2, ExternalLink, RefreshCw, Terminal, MonitorSmartphone, Globe, Cpu, Activity, Info, RotateCcw, ShieldCheck } from "lucide-react";
+import { Play, Square, Plus, Trash2, ExternalLink, RefreshCw, Terminal, MonitorSmartphone, Globe, Cpu, Activity, Info, RotateCcw, ShieldCheck, Monitor, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api, getApiBase } from "@/lib/api";
 
@@ -28,6 +28,7 @@ type FleetStatus = {
   docker_available: boolean;
   container_running: boolean;
   proxy_url?: string;
+  spotify_user?: string | null;
 };
 
 // Combined type
@@ -35,6 +36,8 @@ type MergedAccount = Account & {
   container_running: boolean;
   docker_available: boolean;
   live_logs: string[];
+  proxy_url?: string;
+  spotify_user?: string | null;
 };
 
 export default function Dashboard() {
@@ -44,8 +47,15 @@ export default function Dashboard() {
   const [name, setName] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  const [proxyUrl, setProxyUrl] = useState("");
   const [playlistInputs, setPlaylistInputs] = useState<Record<string, string>>({});
   const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
+  const [setupModal, setSetupModal] = useState<{
+    accountId: string;
+    accountName: string;
+    vncUrl: string;
+  } | null>(null);
+  const [setupStatus, setSetupStatus] = useState<string>("");
 
   const API_BASE = getApiBase();
 
@@ -71,6 +81,8 @@ export default function Dashboard() {
           container_running: f?.container_running || false,
           docker_available: f?.docker_available || false,
           status: f?.status || acc.status,
+          proxy_url: f?.proxy_url || "",
+          spotify_user: f?.spotify_user || null,
           live_logs: [],
         };
       });
@@ -116,9 +128,9 @@ export default function Dashboard() {
     try {
       await api("/api/add_account", {
         method: "POST",
-        body: { name, client_id: clientId, client_secret: clientSecret },
+        body: { name, client_id: clientId, client_secret: clientSecret, proxy_url: proxyUrl },
       });
-      setName(""); setClientId(""); setClientSecret(""); fetchAccounts();
+      setName(""); setClientId(""); setClientSecret(""); setProxyUrl(""); fetchAccounts();
     } catch (err: any) { alert(err.message || "Failed"); }
   }
 
@@ -152,11 +164,40 @@ export default function Dashboard() {
     fetchAccounts();
   }
 
-  async function setupInteractive(id: string) {
-    const d = await api<{message: string}>(`/api/v2/setup/${id}`, { method: "POST" });
-    alert(d.message || "Setup container started! Please connect via VNC or logs to login.");
-    fetchAccounts();
+  async function setupLogin(id: string, accountName: string) {
+    try {
+      const d = await api<{ok: boolean; vnc_url: string; port: number}>(`/api/v2/setup/${id}`, { method: "POST" });
+      if (d.vnc_url) {
+        setSetupModal({ accountId: id, accountName, vncUrl: d.vnc_url });
+        setSetupStatus("waiting");
+      } else {
+        alert("Setup started but no VNC URL returned. Check Docker logs.");
+      }
+      fetchAccounts();
+    } catch (err: any) {
+      alert(err.message || "Failed to start setup container");
+    }
   }
+
+  // Poll setup status when modal is open
+  useEffect(() => {
+    if (!setupModal) return;
+    const interval = setInterval(async () => {
+      try {
+        const d = await api<{status: string; spotify_user?: string}>(`/api/v2/session_status/${setupModal.accountId}`);
+        if (d.status === "done") {
+          setSetupStatus("done");
+          setTimeout(() => {
+            setSetupModal(null);
+            setSetupStatus("");
+            fetchAccounts();
+          }, 2000);
+          clearInterval(interval);
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [setupModal, fetchAccounts]);
 
   async function stopAllNodes() {
     for (const acc of accounts) {
@@ -239,7 +280,7 @@ export default function Dashboard() {
         <h2 className="text-lg font-bold flex items-center gap-2 mb-4 text-white">
           <Plus size={20} className="text-brand-cyan" /> Deploy New Node
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end relative z-10">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end relative z-10">
           <div className="space-y-1">
             <label className="text-xs font-semibold text-brand-cyan uppercase tracking-widest">Node Name</label>
             <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-4 py-3 border border-white/10 rounded-xl focus:outline-none focus:border-brand-cyan transition-all text-sm bg-black/40 text-white placeholder-white/30" placeholder="e.g. Acc-01" />
@@ -251,6 +292,10 @@ export default function Dashboard() {
           <div className="space-y-1">
             <label className="text-xs font-semibold text-brand-cyan uppercase tracking-widest">Client Secret</label>
             <input value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} type="password" className="w-full px-4 py-3 border border-white/10 rounded-xl focus:outline-none focus:border-brand-cyan transition-all text-sm bg-black/40 text-white placeholder-white/30" placeholder="Spotify App Secret" />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-semibold text-brand-cyan uppercase tracking-widest">Proxy URL <span className="text-white/30">(optional)</span></label>
+            <input value={proxyUrl} onChange={(e) => setProxyUrl(e.target.value)} className="w-full px-4 py-3 border border-white/10 rounded-xl focus:outline-none focus:border-brand-cyan transition-all text-sm bg-black/40 text-white placeholder-white/30" placeholder="http://user:pass@host:port" />
           </div>
           <button onClick={addAccount} className="w-full px-4 py-3 rounded-xl text-sm font-bold text-black bg-gradient-to-r from-brand-cyan to-brand-blue shadow-[0_0_15px_rgba(0,242,254,0.3)] hover:scale-105 transition-all">Initialize Node</button>
         </div>
@@ -284,6 +329,9 @@ export default function Dashboard() {
                         <span className={`relative inline-flex rounded-full h-3 w-3 ${isActive ? 'bg-brand-cyan' : isError ? 'bg-brand-pink' : 'bg-white/20'}`}></span>
                       </div>
                       <h3 className="font-bold text-lg text-white">{acc.name}</h3>
+                      {acc.spotify_user && (
+                        <span className="text-xs text-green-400 font-mono">♫ {acc.spotify_user}</span>
+                      )}
                       <div className="flex gap-2">
                         <span className="px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-[10px] uppercase font-mono tracking-wider text-brand-purple flex items-center gap-1">
                           <Cpu size={10} /> Node-{idx+1}
@@ -312,8 +360,8 @@ export default function Dashboard() {
                         {!isActive ? (
                           <>
                             <div className="flex gap-2">
-                              <button onClick={() => setupInteractive(acc.id)} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-brand-purple/20 text-brand-purple border border-brand-purple/40 hover:bg-brand-purple/30 transition-all flex items-center justify-center gap-2">
-                                <MonitorSmartphone size={14} /> Interactive Setup
+                              <button onClick={() => setupLogin(acc.id, acc.name)} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-brand-purple/20 text-brand-purple border border-brand-purple/40 hover:bg-brand-purple/30 transition-all flex items-center justify-center gap-2">
+                                <Monitor size={14} /> Setup Login
                               </button>
                               <button onClick={() => startNode(acc.id)} disabled={!acc.authorized} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 disabled:opacity-30 transition-all flex items-center justify-center gap-2">
                                 <Play size={14} fill="currentColor" /> Docker Node
@@ -349,7 +397,13 @@ export default function Dashboard() {
                       <div className="flex items-center gap-2 mb-2 text-brand-blue">
                         <Globe size={16} /> <span className="text-xs font-bold uppercase tracking-wider">Network Isolation</span>
                       </div>
-                      <div className="text-sm font-mono text-white/80">Container VPN/Proxy</div>
+                      <div className="text-sm font-mono text-white/80">
+                        {acc.proxy_url ? (
+                          <span className="text-brand-cyan text-xs">{acc.proxy_url.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}</span>
+                        ) : (
+                          <span className="text-white/40">Direct (No Proxy)</span>
+                        )}
+                      </div>
                       <div className="mt-2 flex items-center gap-2">
                         <div className={`w-2 h-2 rounded-full ${isActive ? 'bg-brand-cyan shadow-[0_0_8px_#00f2fe]' : 'bg-white/20'}`} />
                         <span className="text-xs text-white/50">{isActive ? 'Tunnel Active' : 'Disconnected'}</span>
@@ -419,6 +473,67 @@ export default function Dashboard() {
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0, 242, 254, 0.5); }
       `}} />
+
+      {/* ── VNC Setup Modal ─────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {setupModal && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setSetupModal(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-[#111] border border-white/10 rounded-2xl overflow-hidden shadow-[0_0_60px_rgba(0,242,254,0.15)] w-full max-w-[1400px] max-h-[90vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between p-4 border-b border-white/10 bg-black/40">
+                <div className="flex items-center gap-3">
+                  <Monitor className="text-brand-purple" size={20} />
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Setting up <span className="text-brand-cyan">{setupModal.accountName}</span></h3>
+                    <p className="text-xs text-white/40 font-mono">
+                      {setupStatus === "done" ? (
+                        <span className="text-green-400">✅ Login detected! Session saved. Starting headless bot...</span>
+                      ) : (
+                        <span className="animate-pulse">⏳ Waiting for Spotify login...</span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSetupModal(null)}
+                  className="p-2 rounded-lg hover:bg-white/10 transition-colors text-white/40 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* noVNC iframe */}
+              <div className="flex-1 bg-black min-h-[600px]">
+                <iframe
+                  src={setupModal.vncUrl}
+                  className="w-full h-full min-h-[600px] border-0"
+                  allow="clipboard-write; clipboard-read"
+                  title={`VNC Setup - ${setupModal.accountName}`}
+                />
+              </div>
+
+              {/* Modal Footer */}
+              <div className="flex items-center justify-between p-3 border-t border-white/10 bg-black/40">
+                <span className="text-xs text-white/30 font-mono">Port: {setupModal.vncUrl.match(/-(\d+)\./)?.[1] || 'N/A'} | Auto-detect active</span>
+                <button
+                  onClick={() => setSetupModal(null)}
+                  className="px-4 py-2 rounded-xl text-sm font-bold bg-brand-pink/20 text-brand-pink border border-brand-pink/40 hover:bg-brand-pink/30 transition-all"
+                >
+                  Cancel Setup
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </main>
   );
 }

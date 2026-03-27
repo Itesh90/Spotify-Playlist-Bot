@@ -1,28 +1,10 @@
-"""
-worker/main.py
-──────────────
-Spotify Playlist Bot — Isolated Worker Node
-Runs inside a Docker container per account.
-
-Modes:
-  INTERACTIVE=1  → Opens visible browser for one-time manual Spotify login.
-                   Saves session state to /app/data/session.json on exit.
-  Default        → Headless mode. Loads session.json, keeps browser open
-                   as an "active device" while Flask orchestrator controls
-                   playback via the Spotify Web API.
-
-Environment variables (injected by orchestrator via docker run -e):
-  ACCOUNT_ID     → Unique account slug (used for storage paths)
-  INTERACTIVE    → Set to "1" for setup mode
-  PROXY_URL      → Optional. Format: http://user:pass@host:port
-"""
-
 import os
 import sys
 import json
 import time
 import signal
 import logging
+import subprocess
 
 from playwright.sync_api import sync_playwright, Browser, BrowserContext
 
@@ -125,32 +107,158 @@ def _launch_browser(playwright, headless: bool) -> tuple[Browser, BrowserContext
     return browser, context
 
 
+# ─── VNC Services (Interactive Mode Only) ─────────────────────────────────────
+
+def _start_vnc_services() -> list[subprocess.Popen]:
+    """
+    Starts Xvfb (virtual display), x11vnc (VNC server), and
+    websockify (WebSocket→VNC bridge for noVNC).
+    Returns subprocess handles for cleanup.
+    """
+    procs = []
+
+    # 1. Start Xvfb on display :99
+    xvfb = subprocess.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1280x800x24"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    procs.append(xvfb)
+    os.environ["DISPLAY"] = ":99"
+    time.sleep(1)  # Wait for Xvfb to initialize
+    log.info(f"Worker {ACCOUNT_ID}: Xvfb started on :99")
+
+    # 2. Start x11vnc — captures the Xvfb display
+    x11vnc = subprocess.Popen(
+        ["x11vnc", "-display", ":99", "-nopw", "-listen", "0.0.0.0",
+         "-xkb", "-forever", "-quiet", "-rfbport", "5900"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    procs.append(x11vnc)
+    time.sleep(0.5)
+    log.info(f"Worker {ACCOUNT_ID}: x11vnc started on port 5900")
+
+    # 3. Start websockify — bridges WebSocket (6080) → VNC (5900)
+    #    noVNC static files are served from /usr/share/novnc
+    novnc_path = "/usr/share/novnc"
+    if not os.path.isdir(novnc_path):
+        novnc_path = "/usr/share/novnc"  # fallback
+    websockify = subprocess.Popen(
+        ["websockify", "0.0.0.0:6080", "localhost:5900", "--web", novnc_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    procs.append(websockify)
+    time.sleep(0.5)
+    log.info(f"Worker {ACCOUNT_ID}: websockify/noVNC started on port 6080")
+
+    return procs
+
+
+def _stop_vnc_services(procs: list[subprocess.Popen]):
+    """Kill all VNC-related subprocesses."""
+    for p in procs:
+        try:
+            p.terminate()
+            p.wait(timeout=5)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
 # ─── Interactive Setup Mode ───────────────────────────────────────────────────
 
 def run_interactive_setup():
     """
-    Opens Spotify Web Player in a visible browser so the user can
-    manually log in. After login, saves session state and exits.
+    Opens Spotify Web Player in a visible browser via noVNC.
+    The user logs in through the dashboard's embedded iframe.
+    Auto-detects login completion, saves session, and exits.
     """
-    log.info(f"Worker {ACCOUNT_ID}: ─── INTERACTIVE SETUP MODE ───")
-    log.info("Open the browser, log in to Spotify, then press ENTER here to save and exit.")
+    log.info(f"Worker {ACCOUNT_ID}: ─── INTERACTIVE SETUP MODE (noVNC) ───")
 
-    with sync_playwright() as p:
-        browser, context = _launch_browser(p, headless=False)
-        page = context.new_page()
-        page.goto("https://open.spotify.com", timeout=30_000)
-        log.info("Browser is open. Log in to Spotify now...")
+    # Start VNC services so the browser is accessible via noVNC on port 6080
+    vnc_procs = _start_vnc_services()
 
-        # Wait for user confirmation
-        input("\n>>> Press ENTER after you have logged in to Spotify <<<\n")
+    try:
+        with sync_playwright() as p:
+            browser, context = _launch_browser(p, headless=False)
+            page = context.new_page()
 
-        # Save cookies & localStorage
-        context.storage_state(path=SESSION_FILE)
-        log.info(f"Worker {ACCOUNT_ID}: Session saved → {SESSION_FILE}")
+            log.info(f"Worker {ACCOUNT_ID}: Navigating to open.spotify.com...")
+            page.goto("https://open.spotify.com", timeout=30_000)
+            log.info(f"Worker {ACCOUNT_ID}: Browser is open. Waiting for user to log in...")
 
-        browser.close()
+            # ── Auto-detect login via URL polling ─────────────────────────
+            spotify_user = None
+            poll_count = 0
+            max_wait = 600  # 10 minutes max
 
-    log.info(f"Worker {ACCOUNT_ID}: Setup complete. Restart without INTERACTIVE=1 for bot mode.")
+            while not _shutdown and poll_count < max_wait // 2:
+                time.sleep(2)
+                poll_count += 1
+
+                try:
+                    current_url = page.url
+
+                    # Still on login/auth page — keep waiting
+                    if "accounts.spotify.com" in current_url or "login" in current_url:
+                        if poll_count % 15 == 0:  # Log every 30 seconds
+                            log.info(f"Worker {ACCOUNT_ID}: Still waiting for login... ({poll_count * 2}s)")
+                        continue
+
+                    # Spotify Web Player loaded — login is complete!
+                    if "open.spotify.com" in current_url and "login" not in current_url:
+                        log.info(f"Worker {ACCOUNT_ID}: Login detected! Saving session...")
+                        time.sleep(3)  # Let page fully load
+
+                        # Capture Spotify username from the DOM
+                        try:
+                            spotify_user = page.evaluate("""
+                                () => {
+                                    const el = document.querySelector('[data-testid="user-widget-link"]');
+                                    return el ? el.textContent.trim() : null;
+                                }
+                            """)
+                        except Exception:
+                            spotify_user = None
+
+                        break
+
+                except Exception as e:
+                    log.warning(f"Worker {ACCOUNT_ID}: URL poll error: {e}")
+                    continue
+
+            # ── Save session ──────────────────────────────────────────────
+            if _shutdown:
+                log.info(f"Worker {ACCOUNT_ID}: Shutdown during setup — aborting.")
+                browser.close()
+                return
+
+            # Save cookies & localStorage
+            context.storage_state(path=SESSION_FILE)
+            log.info(f"Worker {ACCOUNT_ID}: Session saved → {SESSION_FILE}")
+
+            if spotify_user:
+                log.info(f"Worker {ACCOUNT_ID}: Spotify user: {spotify_user}")
+                user_file = os.path.join(DATA_DIR, "spotify_user.txt")
+                with open(user_file, "w") as f:
+                    f.write(spotify_user)
+
+            # Write the .setup_done flag so the backend knows we're finished
+            done_flag = os.path.join(DATA_DIR, ".setup_done")
+            with open(done_flag, "w") as f:
+                f.write("done")
+            log.info(f"Worker {ACCOUNT_ID}: Setup complete flag written.")
+
+            # Keep VNC alive briefly so user sees success in the iframe
+            time.sleep(5)
+
+            browser.close()
+
+    finally:
+        _stop_vnc_services(vnc_procs)
+
+    log.info(f"Worker {ACCOUNT_ID}: Interactive setup complete. Container exiting.")
     sys.exit(0)
 
 
