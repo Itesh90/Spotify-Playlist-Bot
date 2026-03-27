@@ -10,7 +10,7 @@ LABEL maintainer="Spotify Playlist Bot"
 LABEL description="Isolated worker node: Playwright browser + VPN + Spotipy"
 
 # ── System dependencies ───────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     wireguard-tools \
     openresolv \
     openvpn \
