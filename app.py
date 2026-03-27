@@ -23,7 +23,23 @@ app.config["SESSION_PERMANENT"] = True
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
 app.config["SESSION_COOKIE_SAMESITE"] = "None"   # Required for cross-domain cookies
 app.config["SESSION_COOKIE_SECURE"] = True        # Required when SameSite=None
-CORS(app, supports_credentials=True, origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")])
+CORS(app, supports_credentials=True, origins=[
+    os.environ.get("FRONTEND_URL", "http://localhost:3000"),
+    "http://localhost:3000",
+    # Accept any GitHub Codespace URL (port-forwarded origins)
+],  allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+
+# Allow all Codespace origins dynamically
+@app.after_request
+def add_codespace_cors(response):
+    origin = request.headers.get("Origin", "")
+    if ".app.github.dev" in origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    return response
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 TOKENS_DIR = os.path.join(DATA_DIR, "tokens")

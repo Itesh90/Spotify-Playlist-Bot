@@ -1,4 +1,16 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+export function getApiBase(): string {
+  // If explicitly set via env, use it
+  if (process.env.NEXT_PUBLIC_API_URL && process.env.NEXT_PUBLIC_API_URL !== "http://localhost:5000") {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  // Auto-detect GitHub Codespaces: swap port 3000 → 5000 in the URL
+  if (typeof window !== "undefined" && window.location.hostname.includes(".app.github.dev")) {
+    return window.location.origin.replace("-3000.", "-5000.");
+  }
+  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+}
+
+const API_BASE = getApiBase();
 
 type FetchOptions = {
   method?: string;

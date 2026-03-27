@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Play, Square, Plus, Trash2, ExternalLink, RefreshCw, Terminal, MonitorSmartphone, Globe, Cpu, Activity, Info, RotateCcw, ShieldCheck } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { api } from "@/lib/api";
+import { api, getApiBase } from "@/lib/api";
 
 type LogEntry = { time: string; msg: string } | string;
 
@@ -47,7 +47,7 @@ export default function Dashboard() {
   const [playlistInputs, setPlaylistInputs] = useState<Record<string, string>>({});
   const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
 
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+  const API_BASE = getApiBase();
 
   // Auth
   useEffect(() => {

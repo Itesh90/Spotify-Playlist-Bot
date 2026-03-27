@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Activity, LayoutGrid, Monitor, ShieldAlert, Cpu } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { api } from "@/lib/api";
+import { api, getApiBase } from "@/lib/api";
 
 type FleetStatus = {
   id: string;
@@ -17,7 +17,7 @@ export default function Mainframe() {
   const router = useRouter();
   const [fleet, setFleet] = useState<FleetStatus[]>([]);
   const [timestamp, setTimestamp] = useState(Date.now());
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+  const API_BASE = getApiBase();
 
   // Auth check
   useEffect(() => {
