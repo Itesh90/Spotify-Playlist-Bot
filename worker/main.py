@@ -209,11 +209,11 @@ def run_interactive_setup():
             page.goto(login_url, timeout=30_000)
             log.info(f"Worker {ACCOUNT_ID}: Login page loaded. Waiting for user to log in...")
 
-            # ── Auto-detect login via URL polling ─────────────────────────
-            # We start on accounts.spotify.com/login. When the user logs in,
-            # Spotify redirects to open.spotify.com. We detect that transition.
+            # ── Auto-detect login via DOM polling ─────────────────────────
+            # Instead of tracking URL transitions (fragile — Spotify doesn't
+            # always redirect predictably), we check for logged-in UI elements
+            # in the DOM. This works regardless of how the user navigates.
             spotify_user = None
-            seen_login_page = False
             poll_count = 0
             max_polls = 300  # 10 minutes (300 × 2s)
 
@@ -224,44 +224,42 @@ def run_interactive_setup():
                 try:
                     current_url = page.url
 
-                    # Track that we've seen the login page (should be immediate)
-                    if not seen_login_page:
-                        if ("accounts.spotify.com" in current_url or "login" in current_url):
-                            seen_login_page = True
-                            log.info(f"Worker {ACCOUNT_ID}: On login page. Waiting for user to complete login...")
-                        elif poll_count % 10 == 0:
-                            log.info(f"Worker {ACCOUNT_ID}: Waiting for login page... ({poll_count * 2}s) url={current_url[:80]}")
-                        continue
-
-                    # User is still on the login/auth pages — keep waiting
-                    if ("accounts.spotify.com" in current_url or
-                            "login" in current_url or
-                            "challenge" in current_url or
-                            "authorize" in current_url):
+                    # Only check for login on the Spotify web player page
+                    if "open.spotify.com" not in current_url:
                         if poll_count % 15 == 0:
-                            log.info(f"Worker {ACCOUNT_ID}: Still on auth page... ({poll_count * 2}s)")
+                            log.info(f"Worker {ACCOUNT_ID}: On auth page, waiting... ({poll_count * 2}s)")
                         continue
 
-                    # User has left the login page — check if they're on Spotify Web Player
-                    if "open.spotify.com" in current_url:
-                        log.info(f"Worker {ACCOUNT_ID}: ✅ Login detected! URL={current_url}")
-                        time.sleep(3)  # Let page fully settle
+                    # Check DOM for logged-in indicators
+                    login_state = page.evaluate("""
+                        () => {
+                            const userWidget = document.querySelector('[data-testid="user-widget-link"]');
+                            const profileBtn = document.querySelector('[data-testid="user-widget-button"]');
+                            const loginBtn = document.querySelector('[data-testid="login-button"]');
+                            const signupBtn = document.querySelector('[data-testid="signup-button"]');
+                            
+                            if ((userWidget || profileBtn) && !loginBtn) {
+                                return {
+                                    loggedIn: true,
+                                    username: userWidget ? userWidget.textContent.trim() : null
+                                };
+                            }
+                            return { loggedIn: false, username: null };
+                        }
+                    """)
 
-                        # Capture Spotify username from the DOM
-                        try:
-                            spotify_user = page.evaluate("""
-                                () => {
-                                    const el = document.querySelector('[data-testid="user-widget-link"]');
-                                    return el ? el.textContent.trim() : null;
-                                }
-                            """)
-                        except Exception:
-                            spotify_user = None
-
+                    if login_state and login_state.get("loggedIn"):
+                        spotify_user = login_state.get("username")
+                        log.info(f"Worker {ACCOUNT_ID}: ✅ Login detected! User: {spotify_user}")
+                        time.sleep(2)  # Brief settle
                         break
 
+                    # On open.spotify.com but not logged in yet (login button visible)
+                    if poll_count % 15 == 0:
+                        log.info(f"Worker {ACCOUNT_ID}: On Spotify but not logged in yet... ({poll_count * 2}s)")
+
                 except Exception as e:
-                    log.warning(f"Worker {ACCOUNT_ID}: URL poll error: {e}")
+                    log.warning(f"Worker {ACCOUNT_ID}: Poll error: {e}")
                     continue
 
             # ── Save session ──────────────────────────────────────────────
