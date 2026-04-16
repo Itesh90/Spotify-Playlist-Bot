@@ -23,6 +23,7 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV production
 ENV NEXT_TELEMETRY_DISABLED 1
+ENV NODE_OPTIONS="--max-old-space-size=256"
 
 # Optional: define build arg or env
 # ENV NEXT_PUBLIC_API_URL=http://localhost:5000

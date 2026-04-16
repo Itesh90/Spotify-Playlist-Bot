@@ -7,6 +7,18 @@ version: "3.9"
 
 services:
 
+  # ── Worker Image (build-only, not started) ───────────────────────────────────
+  # This service exists solely so `docker compose build` produces the
+  # spb_worker:latest image that the backend spawns dynamically per account.
+  # It is never run as a long-lived container — profiles: ["build-only"]
+  # prevents `docker compose up` from starting it.
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    image: spb_worker:latest
+    profiles: ["build-only"]
+
   # ── Orchestrator: Flask Backend ──────────────────────────────────────────────
   backend:
     build:
@@ -27,6 +39,7 @@ services:
       - ./storage/accounts:/app/storage/accounts  # Per-account session data + live.jpeg
       - ./data:/app/data                          # Account JSON files
       - /var/run/docker.sock:/var/run/docker.sock  # Docker-in-Docker (spawn workers)
+    mem_limit: 512m                                # 4GB VPS — backend gets 512m
     networks:
       - spb_net
 
@@ -46,6 +59,7 @@ services:
       - NODE_ENV=production
     depends_on:
       - backend
+    mem_limit: 512m                                # 4GB VPS — frontend gets 512m
     networks:
       - spb_net
 

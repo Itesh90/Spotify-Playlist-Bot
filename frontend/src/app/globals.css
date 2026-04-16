@@ -2,16 +2,16 @@
 
 @theme {
   --font-sans: var(--font-outfit), ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-  --color-brand-cyan: #00f2fe;
-  --color-brand-blue: #4facfe;
-  --color-brand-purple: #8a2be2;
-  --color-brand-pink: #ff007f;
+  --color-brand-cyan: #A2D2FF;
+  --color-brand-blue: #BDE0FE;
+  --color-brand-purple: #5C677D;
+  --color-brand-pink: #7D8597;
 }
 
 :root {
-  --bg-dark: #0f0c29;
-  --bg-mid: #302b63;
-  --bg-light: #24243e;
+  --bg-dark: #0B0E14;
+  --bg-mid: #11151F;
+  --bg-light: #181E29;
 }
 
 body {
@@ -41,13 +41,13 @@ body::before, body::after {
 }
 
 body::before {
-  background: rgba(0, 242, 254, 0.2);
+  background: rgba(162, 210, 255, 0.15);
   top: -20%;
   left: -20%;
 }
 
 body::after {
-  background: rgba(138, 43, 226, 0.2);
+  background: rgba(92, 103, 125, 0.15);
   bottom: -20%;
   right: -20%;
   animation-delay: -7s;

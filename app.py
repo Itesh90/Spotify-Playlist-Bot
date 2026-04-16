@@ -62,10 +62,15 @@ def _cors_headers(response):
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     return response
 
-# Ensure all session cookies work across the port-forwarded domain
+# Ensure all session cookies work across the port-forwarded domain.
+# SESSION_COOKIE_SECURE must be False when serving over plain HTTP (e.g. Oracle
+# instance without SSL), otherwise the browser silently drops the cookie and
+# every request after login appears as 401.
+_BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000")
+_COOKIE_SECURE = _BASE_URL.startswith("https://")
 app.config.update(
-    SESSION_COOKIE_SAMESITE="None",
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=_COOKIE_SECURE,
     PERMANENT_SESSION_LIFETIME=timedelta(days=365)
 )
 
@@ -80,7 +85,7 @@ os.makedirs(TOKENS_DIR, exist_ok=True)
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:5000").rstrip("/")
 if BASE_URL and not BASE_URL.startswith("http"):
     BASE_URL = f"https://{BASE_URL}"
-REDIRECT_URI = f"{BASE_URL}/callback"
+REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://127.0.0.1:3000/callback")
 SCOPE = "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-library-modify user-read-currently-playing"
 
 bot_threads: dict[str, threading.Thread] = {}
@@ -815,17 +820,51 @@ def api_list_accounts():
         if os.path.exists(user_file):
             with open(user_file, "r") as f:
                 spotify_user = f.read().strip()
+
+        # Live current_index: the worker writes to <data>/playlists.json at
+        # the start of each playlist. Prefer that over the stale account
+        # JSON so the dashboard highlights the playlist that's actually
+        # playing right now.
+        current_index = a["current_index"]
+        live_pl_file = os.path.join(HOST_STORAGE, a["id"], "playlists.json")
+        if os.path.exists(live_pl_file):
+            try:
+                with open(live_pl_file, "r") as f:
+                    live = json.load(f)
+                if isinstance(live.get("current_index"), int):
+                    current_index = live["current_index"]
+            except Exception:
+                pass
+
+        # Resume availability: we have a valid last_state.json the worker
+        # wrote during a previous run, so the UI can enable the button.
+        last_state_file = os.path.join(HOST_STORAGE, a["id"], "last_state.json")
+        last_state = None
+        if os.path.exists(last_state_file):
+            try:
+                with open(last_state_file, "r") as f:
+                    ls = json.load(f)
+                last_state = {
+                    "playlist_index": ls.get("playlist_index"),
+                    "track_name": ls.get("track_name", ""),
+                    "updated_at": ls.get("updated_at", ""),
+                }
+            except Exception:
+                pass
+
         safe.append({
             "id": a["id"],
             "name": a["name"],
             "playlists": a["playlists"],
-            "current_index": a["current_index"],
+            "current_index": current_index,
             "status": a["status"] if not running else a["status"],
             "authorized": a.get("authorized", False),
+            "has_credentials": bool(a.get("client_id") and a.get("client_secret")),
             "proxy_url": a.get("proxy_url", ""),
             "spotify_user": spotify_user,
             "log": a.get("log", []),
             "running": running,
+            "last_state": last_state,
         })
     return jsonify(safe)
 
@@ -844,8 +883,8 @@ def api_add_account():
     client_id = data.get("client_id", "").strip()
     client_secret = data.get("client_secret", "").strip()
     proxy_url = data.get("proxy_url", "").strip()
-    if not name or not client_id or not client_secret:
-        return jsonify({"error": "name, client_id, client_secret are required"}), 400
+    if not name:
+        return jsonify({"error": "name is required"}), 400
     acc = new_account(name, client_id, client_secret, proxy_url=proxy_url)
     return jsonify(acc), 201
 
@@ -855,6 +894,24 @@ def api_add_account():
 def api_delete_account(account_id):
     stop_bot(account_id)
     delete_account_files(account_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/update_account/<account_id>", methods=["PUT"])
+@login_required
+def api_update_account(account_id):
+    """Update an account's client_id, client_secret, or proxy_url."""
+    acc = load_account(account_id)
+    if not acc:
+        return jsonify({"error": "Account not found"}), 404
+    data = request.json or {}
+    if "client_id" in data:
+        acc["client_id"] = data["client_id"].strip()
+    if "client_secret" in data:
+        acc["client_secret"] = data["client_secret"].strip()
+    if "proxy_url" in data:
+        acc["proxy_url"] = data["proxy_url"].strip()
+    save_account(account_id, acc)
     return jsonify({"ok": True})
 
 
@@ -982,6 +1039,8 @@ def api_reauthorize(account_id):
     spotipy_cache = os.path.join(TOKENS_DIR, f".cache-{account_id}")
     if os.path.exists(spotipy_cache):
         os.remove(spotipy_cache)
+    if not acc.get("client_id") or not acc.get("client_secret"):
+        return jsonify({"error": "No Client ID / Client Secret configured for this account. Add them first."}), 400
     acc["authorized"] = False
     save_account(account_id, acc)
     add_log(account_id, "Authorization cleared — click Authorize to re-login")
@@ -998,6 +1057,8 @@ def auth_login(account_id):
     acc = load_account(account_id)
     if not acc:
         return jsonify({"error": "Account not found"}), 404
+    if not acc.get("client_id") or not acc.get("client_secret"):
+        return jsonify({"error": "No Client ID / Client Secret configured for this account. Add them first."}), 400
     oauth = get_oauth(acc)
     auth_url = oauth.get_authorize_url(state=account_id)
     return redirect(auth_url)
@@ -1033,7 +1094,6 @@ def auth_callback():
 # New /api/v2/* routes are the path forward for multi-account isolation.
 # ─────────────────────────────────────────────────────────────────────────────
 
-DOCKER_AVAILABLE = False
 docker_mgr = None
 
 # Host-side path to per-account storage (used by /api/v2/screen to serve live.jpeg)
@@ -1043,43 +1103,70 @@ HOST_STORAGE = os.environ.get("HOST_STORAGE_PATH", os.path.join(
 
 try:
     import backend.docker_manager as docker_mgr  # type: ignore
-    # Quick connectivity test
-    import docker as _docker_lib
-    _docker_lib.from_env().ping()
-    DOCKER_AVAILABLE = True
 except Exception as _docker_err:
-    pass  # Docker not available in this environment (e.g., local dev without Docker)
+    print(f"[WARN] Docker manager import failed: {type(_docker_err).__name__}: {_docker_err}")
+
+
+def _docker_available() -> bool:
+    """Check Docker connectivity on every call (handles late Docker Desktop start)."""
+    if docker_mgr is None:
+        return False
+    try:
+        import docker as _docker_lib
+        _docker_lib.from_env().ping()
+        return True
+    except Exception:
+        return False
 
 
 @app.route("/api/v2/start/<account_id>", methods=["POST"])
 @login_required
 def api_v2_start(account_id):
     """Start a worker container for this account (Docker mode)."""
-    if not DOCKER_AVAILABLE:
+    if not _docker_available():
         return jsonify({"error": "Docker not available on this host"}), 503
     acc = load_account(account_id)
     if not acc:
         return jsonify({"error": "Account not found"}), 404
-    if not acc.get("authorized"):
-        return jsonify({"error": "Account not authorized — run Spotify OAuth first"}), 400
 
-    # Read proxy_url from stored account data (set during account creation)
-    proxy_url = acc.get("proxy_url", "")
+    # Docker Node only needs a saved browser session (from VNC login), not OAuth
+    session_file = os.path.join(HOST_STORAGE, account_id, "session.json")
+    if not acc.get("authorized") and not os.path.exists(session_file):
+        return jsonify({"error": "No session found — use Setup Login (VNC) or OAuth first"}), 400
 
-    err = docker_mgr.start_worker(account_id, proxy_url=proxy_url)
+    # Read proxy_url: per-request body override wins, else fall back to stored account proxy
+    data = request.get_json(silent=True) or {}
+    proxy_url = data.get("proxy_url", "") or acc.get("proxy_url", "")
+
+    # Write playlists to data dir so the worker can play them
+    playlists = acc.get("playlists", [])
+    if playlists:
+        playlist_file = os.path.join(HOST_STORAGE, account_id, "playlists.json")
+        with open(playlist_file, "w") as f:
+            json.dump({"playlists": playlists, "current_index": acc.get("current_index", 0)}, f)
+
+    # Stop and remove any existing container (running, exited, or stopped)
+    # before creating a new one. stop_worker handles all states via force=True.
+    docker_mgr.stop_worker(account_id)
+
+    # Resume mode: user clicked "Resume" in the dashboard → worker reads
+    # last_state.json and jumps to the last-played playlist + track.
+    resume_mode = request.args.get("resume") == "1"
+
+    err = docker_mgr.start_worker(account_id, proxy_url=proxy_url, resume_mode=resume_mode)
     if err:
         return jsonify({"error": err}), 500
 
     set_status(account_id, "playing")
-    add_log(account_id, "Worker container started (Docker mode)")
-    return jsonify({"ok": True, "mode": "docker"})
+    add_log(account_id, f"Worker container started (Docker mode{', resume' if resume_mode else ''})")
+    return jsonify({"ok": True, "mode": "docker", "resume": resume_mode})
 
 
 @app.route("/api/v2/stop/<account_id>", methods=["POST"])
 @login_required
 def api_v2_stop(account_id):
     """Stop and remove the worker container for this account."""
-    if not DOCKER_AVAILABLE:
+    if not _docker_available():
         return jsonify({"error": "Docker not available on this host"}), 503
     err = docker_mgr.stop_worker(account_id)
     if err:
@@ -1093,7 +1180,7 @@ def api_v2_stop(account_id):
 @login_required
 def api_v2_logs(account_id):
     """Stream the last N log lines from the worker container."""
-    if not DOCKER_AVAILABLE:
+    if not _docker_available():
         # Fallback: return stored log entries from account JSON
         acc = load_account(account_id)
         if not acc:
@@ -1113,14 +1200,15 @@ def api_v2_setup(account_id):
     Returns a VNC URL that the frontend embeds in an iframe.
     The worker auto-detects Spotify login and saves session.json.
     """
-    if not DOCKER_AVAILABLE:
+    if not _docker_available():
         return jsonify({"error": "Docker not available on this host"}), 503
     acc = load_account(account_id)
     if not acc:
         return jsonify({"error": "Account not found"}), 404
 
-    # Read proxy_url from stored account data
-    proxy_url = acc.get("proxy_url", "")
+    # Read proxy_url: per-request body override wins, else fall back to stored account proxy
+    data = request.get_json(silent=True) or {}
+    proxy_url = data.get("proxy_url", "") or acc.get("proxy_url", "")
 
     # Clean up any leftover .setup_done flag from a previous run
     done_flag = os.path.join(HOST_STORAGE, account_id, ".setup_done")
@@ -1145,25 +1233,25 @@ def api_v2_setup(account_id):
 
     if vnc_host_override:
         # Explicit manual override — highest priority
-        vnc_url = f"https://{vnc_host_override.replace('-3000.', f'-{vnc_port}.')}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"https://{vnc_host_override.replace('-3000.', f'-{vnc_port}.')}/vnc.html?autoconnect=true&reconnect=true&reconnect_delay=1500&resize=scale"
 
     elif frontend_url and ".app.github.dev" in frontend_url:
         # GitHub Codespaces — FRONTEND_URL is https://xxx-3000.app.github.dev
         # Replace the -3000 port segment with the assigned VNC port
         import re
         vnc_url_base = re.sub(r"-\d+\.app\.github\.dev", f"-{vnc_port}.app.github.dev", frontend_url)
-        vnc_url = f"{vnc_url_base}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"{vnc_url_base}/vnc.html?autoconnect=true&reconnect=true&reconnect_delay=1500&resize=scale"
 
     elif frontend_url:
         # Oracle / self-hosted — FRONTEND_URL is http://IP:3000 or https://domain
         # Use server IP with direct VNC port
         import re
         server_ip = re.sub(r"https?://", "", frontend_url).split(":")[0].split("/")[0]
-        vnc_url = f"http://{server_ip}:{vnc_port}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"http://{server_ip}:{vnc_port}/vnc.html?autoconnect=true&reconnect=true&reconnect_delay=1500&resize=scale"
 
     else:
         # Last resort fallback (local dev)
-        vnc_url = f"http://localhost:{vnc_port}/vnc_lite.html?autoconnect=true&resize=scale"
+        vnc_url = f"http://localhost:{vnc_port}/vnc.html?autoconnect=true&reconnect=true&reconnect_delay=1500&resize=scale"
 
     set_status(account_id, "setup")
     add_log(account_id, "Interactive setup started — log in to Spotify in the embedded browser")
@@ -1198,7 +1286,7 @@ def api_v2_session_status(account_id):
         os.remove(done_flag)
 
         # Auto-start headless worker if Docker is available
-        if DOCKER_AVAILABLE and docker_mgr and os.path.exists(session_file):
+        if _docker_available() and docker_mgr and os.path.exists(session_file):
             proxy_url = acc.get("proxy_url", "") if acc else ""
             docker_mgr.start_worker(account_id, proxy_url=proxy_url)
             set_status(account_id, "playing")
@@ -1222,7 +1310,7 @@ def api_v2_fleet():
     Merges Docker container statuses with account metadata for the dashboard.
     """
     accounts = load_all_accounts()
-    if DOCKER_AVAILABLE:
+    if _docker_available():
         docker_statuses = docker_mgr.get_all_worker_statuses()
     else:
         docker_statuses = {}
@@ -1237,14 +1325,19 @@ def api_v2_fleet():
         if os.path.exists(user_file):
             with open(user_file, "r") as f:
                 spotify_user = f.read().strip()
+        # Check if VNC session exists (session.json saved from interactive login)
+        session_file = os.path.join(HOST_STORAGE, aid, "session.json")
+        has_session = os.path.exists(session_file)
+
         fleet.append({
             "id": aid,
             "name": acc["name"],
             "authorized": acc.get("authorized", False),
+            "has_session": has_session,
             "playlists": len(acc.get("playlists", [])),
             "current_index": acc.get("current_index", 0),
             "status": docker_status or acc.get("status", "idle"),
-            "docker_available": DOCKER_AVAILABLE,
+            "docker_available": _docker_available(),
             "container_running": docker_status == "running",
             "proxy_url": acc.get("proxy_url", ""),
             "spotify_user": spotify_user,
@@ -1262,7 +1355,11 @@ def api_v2_screen(account_id):
     from flask import send_file
     screen_path = os.path.join(HOST_STORAGE, account_id, "live.jpeg")
     if os.path.exists(screen_path):
-        return send_file(screen_path, mimetype='image/jpeg')
+        resp = send_file(screen_path, mimetype='image/jpeg')
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
     else:
         return jsonify({"error": "No screen available"}), 404
 

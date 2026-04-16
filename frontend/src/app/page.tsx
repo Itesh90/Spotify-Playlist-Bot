@@ -1,27 +1,36 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Play, Square, Plus, Trash2, RefreshCw, Terminal, MonitorSmartphone, Globe, Cpu, Activity, RotateCcw, ShieldCheck, Monitor } from "lucide-react";
+import { Play, Square, Plus, X, Trash2, RefreshCw, Terminal, MonitorSmartphone, Globe, Cpu, Activity, RotateCcw, ShieldCheck, Monitor, SkipForward } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api, getApiBase } from "@/lib/api";
 
 type LogEntry = { time: string; msg: string } | string;
 
+type LastState = {
+  playlist_index: number | null;
+  track_name: string;
+  updated_at: string;
+};
+
 type Account = {
   id: string;
   name: string;
   authorized: boolean;
+  has_credentials: boolean;
   playlists: string[];
   status: string;
   current_index: number;
   log?: LogEntry[];
+  last_state?: LastState | null;
 };
 
 type FleetStatus = {
   id: string;
   name: string;
   authorized: boolean;
+  has_session: boolean;
   playlists: number;
   current_index: number;
   status: string;
@@ -35,6 +44,8 @@ type FleetStatus = {
 type MergedAccount = Account & {
   container_running: boolean;
   docker_available: boolean;
+  has_session: boolean;
+  has_credentials: boolean;
   live_logs: string[];
   proxy_url?: string;
   spotify_user?: string | null;
@@ -50,11 +61,22 @@ export default function Dashboard() {
   const [proxyUrl, setProxyUrl] = useState("");
   const [playlistInputs, setPlaylistInputs] = useState<Record<string, string>>({});
   const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
+  const [expandedCreds, setExpandedCreds] = useState<Record<string, boolean>>({});
+  const [credInputs, setCredInputs] = useState<Record<string, { client_id: string; client_secret: string }>>({});
   const [setupModal, setSetupModal] = useState<{
     accountId: string;
     accountName: string;
+    vncUrl?: string;
   } | null>(null);
   const [setupStatus, setSetupStatus] = useState<string>("");
+  const [logTab, setLogTab] = useState<Record<string, 'docker' | 'events'>>({});
+  const [busyButtons, setBusyButtons] = useState<Record<string, boolean>>({});
+  const [nodeProxyInputs, setNodeProxyInputs] = useState<Record<string, string>>({});
+  const [showProxyInput, setShowProxyInput] = useState<Record<string, boolean>>({});
+
+  // Ref for stable access to accounts in polling intervals (avoids stale closures)
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
 
   const API_BASE = getApiBase();
 
@@ -73,19 +95,23 @@ export default function Dashboard() {
         api<FleetStatus[]>("/api/v2/fleet").catch(() => []),
       ]);
 
-      const merged = accData.map((acc) => {
-        const f = fleetData.find((fd) => fd.id === acc.id);
-        return {
-          ...acc,
-          container_running: f?.container_running || false,
-          docker_available: f?.docker_available || false,
-          status: f?.status || acc.status,
-          proxy_url: f?.proxy_url || "",
-          spotify_user: f?.spotify_user || null,
-          live_logs: [],
-        };
+      setAccounts(prev => {
+        return accData.map((acc) => {
+          const f = fleetData.find((fd) => fd.id === acc.id);
+          const existing = prev.find(p => p.id === acc.id);
+          return {
+            ...acc,
+            container_running: f?.container_running || false,
+            docker_available: f?.docker_available || false,
+            has_session: f?.has_session || false,
+            has_credentials: acc.has_credentials || false,
+            status: f?.status || acc.status,
+            proxy_url: f?.proxy_url || "",
+            spotify_user: f?.spotify_user || null,
+            live_logs: existing?.live_logs || [],
+          };
+        });
       });
-      setAccounts(merged);
     } catch { /* ignore */ }
   }, []);
 
@@ -96,34 +122,31 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [user, fetchAccounts]);
 
-  // Real-time live logs
+  // Real-time live logs — fetch Docker container logs for active accounts
   useEffect(() => {
     if (!user) return;
+    let active = true;
     const fetchLogs = async () => {
-      setAccounts((prev) => {
-        const next = [...prev];
-        next.forEach(async (acc, i) => {
-          if (acc.container_running || acc.status === "setup") {
-            try {
-              const data = await api<{ logs: string[] }>(`/api/v2/logs/${acc.id}?tail=15`);
-              setAccounts((curr) => {
-                const c = [...curr];
-                if (c[i]) c[i].live_logs = data.logs;
-                return c;
-              });
-            } catch { }
-          }
-        });
-        return next;
-      });
+      const current = accountsRef.current;
+      for (const acc of current) {
+        if (!active) break;
+        if (acc.container_running || acc.status === "setup" || acc.status === "playing") {
+          try {
+            const data = await api<{ logs: string[] }>(`/api/v2/logs/${acc.id}?tail=20`);
+            if (data.logs && data.logs.length > 0) {
+              setAccounts(curr => curr.map(a => a.id === acc.id ? { ...a, live_logs: data.logs } : a));
+            }
+          } catch { /* keep existing live_logs on failure — prevents flicker */ }
+        }
+      }
     };
-    const logInterval = setInterval(fetchLogs, 2000);
-    return () => clearInterval(logInterval);
+    const logInterval = setInterval(fetchLogs, 3000);
+    return () => { active = false; clearInterval(logInterval); };
   }, [user]);
 
   // Account Operations
   async function addAccount() {
-    if (!name || !clientId || !clientSecret) return;
+    if (!name) return;
     try {
       await api("/api/add_account", {
         method: "POST",
@@ -153,8 +176,12 @@ export default function Dashboard() {
   }
 
   // V2 Orchestration Operations
-  async function startNode(id: string) {
-    await api(`/api/v2/start/${id}`, { method: "POST" });
+  async function startNode(id: string, resume: boolean = false, proxyOverride: string = "") {
+    const url = resume ? `/api/v2/start/${id}?resume=1` : `/api/v2/start/${id}`;
+    await api(url, {
+      method: "POST",
+      ...(proxyOverride ? { body: { proxy_url: proxyOverride } } : {})
+    });
     fetchAccounts();
   }
 
@@ -163,12 +190,21 @@ export default function Dashboard() {
     fetchAccounts();
   }
 
-  async function setupLogin(id: string, accountName: string) {
+  async function setupLogin(id: string, accountName: string, proxyOverride: string = "") {
     try {
-      const d = await api<{ ok: boolean; mode: string }>(`/api/v2/setup/${id}`, { method: "POST" });
-      if (d.ok) {
-        setSetupModal({ accountId: id, accountName });
-        setSetupStatus("waiting");
+      const d = await api<{ ok: boolean; vnc_url: string; port: number }>(
+        `/api/v2/setup/${id}`,
+        { method: "POST", ...(proxyOverride ? { body: { proxy_url: proxyOverride } } : {}) }
+      );
+      if (d.ok && d.vnc_url) {
+        setSetupModal({ accountId: id, accountName, vncUrl: d.vnc_url });
+        setSetupStatus("starting");
+        // Wait for VNC services to initialize inside the container
+        // (Xvfb ~2s + x11vnc ~1s + websockify ~2s + browser launch ~2s)
+        setTimeout(() => {
+          window.open(d.vnc_url, "_blank");
+          setSetupStatus("waiting");
+        }, 6000);
       } else {
         alert("Setup failed. Check Docker logs.");
       }
@@ -186,6 +222,8 @@ export default function Dashboard() {
         const d = await api<{ status: string; spotify_user?: string }>(`/api/v2/session_status/${setupModal.accountId}`);
         if (d.status === "done") {
           setSetupStatus("done");
+          // Auto-open browser window so user sees the Spotify Web Player
+          window.open(`/browser/${setupModal.accountId}`, "_blank");
           setTimeout(() => {
             setSetupModal(null);
             setSetupStatus("");
@@ -234,6 +272,32 @@ export default function Dashboard() {
   }
 
   const toggleLogs = (id: string) => setExpandedLogs(p => ({ ...p, [id]: !p[id] }));
+  const toggleCreds = (id: string) => {
+    setExpandedCreds(p => ({ ...p, [id]: !p[id] }));
+    if (!credInputs[id]) {
+      setCredInputs(p => ({ ...p, [id]: { client_id: "", client_secret: "" } }));
+    }
+  };
+
+  async function saveCredentials(id: string) {
+    const creds = credInputs[id];
+    if (!creds?.client_id || !creds?.client_secret) { alert("Both Client ID and Client Secret are required"); return; }
+    try {
+      await api(`/api/update_account/${id}`, { method: "PUT", body: { client_id: creds.client_id, client_secret: creds.client_secret } });
+      setExpandedCreds(p => ({ ...p, [id]: false }));
+      fetchAccounts();
+    } catch (err: any) { alert(err.message || "Failed to save credentials"); }
+  }
+
+  /** Parse raw Docker log line into clean display format */
+  function parseDockerLog(raw: string): { time: string; msg: string; level: string } {
+    // Raw format: "2026-03-29T17:05:35.592Z 2026-03-29 17:05:35,591 [INFO] Worker abc123: message"
+    const m = raw.match(/\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}:\d{2}),?\d*\s+\[(INFO|WARN|ERROR|DEBUG)\]\s+Worker\s+\w+:\s*(.*)/);
+    if (m) return { time: m[1], msg: m[3], level: m[2] };
+    // Fallback: strip leading ISO timestamp
+    const stripped = raw.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*/, '').trim();
+    return { time: '', msg: stripped, level: 'INFO' };
+  }
 
   if (!user) {
     return (
@@ -285,11 +349,11 @@ export default function Dashboard() {
             <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-4 py-3 border border-white/10 rounded-xl focus:outline-none focus:border-brand-cyan transition-all text-sm bg-black/40 text-white placeholder-white/30" placeholder="e.g. Acc-01" />
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-semibold text-brand-cyan uppercase tracking-widest">Client ID</label>
+            <label className="text-xs font-semibold text-brand-cyan uppercase tracking-widest">Client ID <span className="text-white/30">(optional)</span></label>
             <input value={clientId} onChange={(e) => setClientId(e.target.value)} className="w-full px-4 py-3 border border-white/10 rounded-xl focus:outline-none focus:border-brand-cyan transition-all text-sm bg-black/40 text-white placeholder-white/30" placeholder="Spotify App ID" />
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-semibold text-brand-cyan uppercase tracking-widest">Client Secret</label>
+            <label className="text-xs font-semibold text-brand-cyan uppercase tracking-widest">Client Secret <span className="text-white/30">(optional)</span></label>
             <input value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} type="password" className="w-full px-4 py-3 border border-white/10 rounded-xl focus:outline-none focus:border-brand-cyan transition-all text-sm bg-black/40 text-white placeholder-white/30" placeholder="Spotify App Secret" />
           </div>
           <div className="space-y-1">
@@ -352,58 +416,157 @@ export default function Dashboard() {
                       </div>
 
                       <div className="flex flex-col gap-2">
-                        {!acc.authorized && (
+                        {!acc.authorized && !acc.has_session && acc.has_credentials && (
                           <a href={`${API_BASE}/authorize/${acc.id}`} className="w-full text-center px-4 py-2 rounded-xl text-sm font-bold bg-yellow-500/20 text-yellow-300 border border-yellow-500/40 hover:bg-yellow-500/30 transition-all shadow-[0_0_15px_rgba(234,179,8,0.2)]">1. OAuth Auth</a>
+                        )}
+                        {!acc.authorized && !acc.has_session && !acc.has_credentials && (
+                          <button onClick={() => toggleCreds(acc.id)} className="w-full text-center px-4 py-2 rounded-xl text-xs font-bold bg-white/5 text-white/30 border border-white/10 hover:border-yellow-500/40 hover:text-yellow-300 transition-all">
+                            {expandedCreds[acc.id] ? "Cancel" : "No OAuth credentials — click to add"}
+                          </button>
+                        )}
+                        {expandedCreds[acc.id] && (
+                          <div className="flex flex-col gap-2 p-3 rounded-xl bg-black/30 border border-yellow-500/20">
+                            <input value={credInputs[acc.id]?.client_id || ""} onChange={(e) => setCredInputs(p => ({ ...p, [acc.id]: { ...p[acc.id], client_id: e.target.value } }))} placeholder="Spotify Client ID" className="w-full px-3 py-2 bg-black/40 border border-white/10 rounded-lg text-xs text-white placeholder-white/30 focus:outline-none focus:border-brand-cyan" />
+                            <input value={credInputs[acc.id]?.client_secret || ""} onChange={(e) => setCredInputs(p => ({ ...p, [acc.id]: { ...p[acc.id], client_secret: e.target.value } }))} type="password" placeholder="Spotify Client Secret" className="w-full px-3 py-2 bg-black/40 border border-white/10 rounded-lg text-xs text-white placeholder-white/30 focus:outline-none focus:border-brand-cyan" />
+                            <button onClick={() => saveCredentials(acc.id)} className="w-full px-3 py-2 rounded-lg text-xs font-bold bg-yellow-500/20 text-yellow-300 border border-yellow-500/40 hover:bg-yellow-500/30 transition-all">Save Credentials</button>
+                          </div>
+                        )}
+                        {acc.has_session && !acc.authorized && (
+                          <div className="w-full text-center px-4 py-2 rounded-xl text-xs font-bold bg-green-500/10 text-green-400 border border-green-500/30">VNC Session Active</div>
                         )}
 
                         {!isActive ? (
                           <>
                             <div className="flex gap-2">
-                              <button onClick={() => setupLogin(acc.id, acc.name)} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-brand-purple/20 text-brand-purple border border-brand-purple/40 hover:bg-brand-purple/30 transition-all flex items-center justify-center gap-2">
-                                <Monitor size={14} /> Setup Login
+                              <button
+                                disabled={busyButtons[`setup_${acc.id}`]}
+                                onClick={async () => {
+                                  if (busyButtons[`setup_${acc.id}`]) return;
+                                  setBusyButtons(p => ({ ...p, [`setup_${acc.id}`]: true }));
+                                  await setupLogin(acc.id, acc.name, nodeProxyInputs[acc.id] || "");
+                                  setBusyButtons(p => ({ ...p, [`setup_${acc.id}`]: false }));
+                                }}
+                                className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-brand-purple/20 text-brand-purple border border-brand-purple/40 hover:bg-brand-purple/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                              >
+                                <Monitor size={14} /> {busyButtons[`setup_${acc.id}`] ? 'Starting...' : 'Setup Login'}
                               </button>
-                              <button onClick={() => startNode(acc.id)} disabled={!acc.authorized} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 disabled:opacity-30 transition-all flex items-center justify-center gap-2">
-                                <Play size={14} fill="currentColor" /> Docker Node
+                              <button
+                                disabled={(!acc.authorized && !acc.has_session) || busyButtons[`start_${acc.id}`]}
+                                onClick={async () => {
+                                  if (busyButtons[`start_${acc.id}`]) return;
+                                  setBusyButtons(p => ({ ...p, [`start_${acc.id}`]: true }));
+                                  await startNode(acc.id, false, nodeProxyInputs[acc.id] || "");
+                                  setBusyButtons(p => ({ ...p, [`start_${acc.id}`]: false }));
+                                }}
+                                className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 disabled:opacity-30 transition-all flex items-center justify-center gap-2"
+                              >
+                                <Play size={14} fill="currentColor" /> {busyButtons[`start_${acc.id}`] ? 'Starting...' : 'Docker Node'}
                               </button>
                             </div>
+                            {acc.last_state && acc.last_state.track_name && (
+                              <button
+                                disabled={(!acc.authorized && !acc.has_session) || busyButtons[`resume_${acc.id}`]}
+                                title={`Resume from '${acc.last_state.track_name}' (saved ${acc.last_state.updated_at})`}
+                                onClick={async () => {
+                                  if (busyButtons[`resume_${acc.id}`]) return;
+                                  setBusyButtons(p => ({ ...p, [`resume_${acc.id}`]: true }));
+                                  await startNode(acc.id, true, nodeProxyInputs[acc.id] || "");
+                                  setBusyButtons(p => ({ ...p, [`resume_${acc.id}`]: false }));
+                                }}
+                                className="w-full px-3 py-2 rounded-xl text-xs font-bold bg-yellow-500/15 text-yellow-300 border border-yellow-500/30 hover:bg-yellow-500/25 disabled:opacity-30 transition-all flex items-center justify-center gap-2"
+                              >
+                                <SkipForward size={14} />
+                                {busyButtons[`resume_${acc.id}`]
+                                  ? 'Resuming...'
+                                  : `Resume from "${acc.last_state.track_name.slice(0, 30)}${acc.last_state.track_name.length > 30 ? '…' : ''}"`}
+                              </button>
+                            )}
                             <div className="flex gap-2">
-                              <button onClick={() => startBot(acc.id)} disabled={!acc.authorized} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/40 hover:bg-green-500/30 disabled:opacity-30 transition-all flex items-center justify-center gap-2">
+                              <button onClick={() => startBot(acc.id)} disabled={!acc.authorized} title={!acc.authorized ? (!acc.has_credentials ? "Add Client ID & Secret first, then authorize" : "Authorize via OAuth first") : ""} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/40 hover:bg-green-500/30 disabled:opacity-30 transition-all flex items-center justify-center gap-2">
                                 <Play size={14} /> Start Bot
                               </button>
                               <button onClick={() => resetQueue(acc.id)} className="flex-1 px-3 py-2 rounded-xl text-xs font-bold bg-orange-500/20 text-orange-400 border border-orange-500/40 hover:bg-orange-500/30 transition-all flex items-center justify-center gap-2">
                                 <RotateCcw size={14} /> Restart Queue
                               </button>
                             </div>
-                            <button onClick={() => reauthorize(acc.id)} className="w-full px-3 py-2 rounded-xl text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 hover:bg-amber-500/20 transition-all flex items-center justify-center gap-2">
-                              <ShieldCheck size={14} /> Re-Authorize
+                            {acc.has_credentials && (
+                              <button onClick={() => reauthorize(acc.id)} className="w-full px-3 py-2 rounded-xl text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 hover:bg-amber-500/20 transition-all flex items-center justify-center gap-2">
+                                <ShieldCheck size={14} /> Re-Authorize
+                              </button>
+                            )}
+                            <button onClick={() => window.open(`/browser/${acc.id}`, "_blank")} className="w-full px-3 py-2 rounded-xl text-xs font-bold bg-brand-blue/20 text-brand-blue border border-brand-blue/40 hover:bg-brand-blue/30 transition-all flex items-center justify-center gap-2">
+                              <Monitor size={14} /> Browser Window
                             </button>
                           </>
                         ) : (
-                          <div className="flex gap-2">
-                            <button onClick={() => stopBot(acc.id)} className="flex-1 px-4 py-2 rounded-xl text-sm font-bold bg-brand-pink/20 text-brand-pink border border-brand-pink/40 hover:bg-brand-pink/30 hover:shadow-[0_0_15px_rgba(255,0,127,0.3)] transition-all flex items-center justify-center gap-2">
-                              <Square size={14} fill="currentColor" /> Stop Bot
+                          <>
+                            <div className="flex gap-2">
+                              <button
+                                disabled={busyButtons[`stop_${acc.id}`]}
+                                onClick={async () => {
+                                  if (busyButtons[`stop_${acc.id}`]) return;
+                                  setBusyButtons(p => ({ ...p, [`stop_${acc.id}`]: true }));
+                                  await Promise.all([stopBot(acc.id), stopNode(acc.id)]);
+                                  setBusyButtons(p => ({ ...p, [`stop_${acc.id}`]: false }));
+                                }}
+                                className="flex-1 px-4 py-2 rounded-xl text-sm font-bold bg-brand-pink/20 text-brand-pink border border-brand-pink/40 hover:bg-brand-pink/30 hover:shadow-[0_0_15px_rgba(255,0,127,0.3)] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                              >
+                                <Square size={14} fill="currentColor" /> {busyButtons[`stop_${acc.id}`] ? 'Stopping...' : 'Stop All'}
+                              </button>
+                            </div>
+                            <button onClick={() => window.open(`/browser/${acc.id}`, "_blank")} className="w-full px-3 py-2 rounded-xl text-xs font-bold bg-brand-blue/20 text-brand-blue border border-brand-blue/40 hover:bg-brand-blue/30 transition-all flex items-center justify-center gap-2">
+                              <Monitor size={14} /> Browser Window
                             </button>
-                            <button onClick={() => stopNode(acc.id)} className="flex-1 px-4 py-2 rounded-xl text-sm font-bold bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 transition-all flex items-center justify-center gap-2">
-                              <Square size={14} fill="currentColor" /> Kill Node
-                            </button>
-                          </div>
+                          </>
                         )}
                       </div>
                     </div>
 
                     {/* Network & Identity */}
-                    <div className="bg-black/30 rounded-xl p-4 border border-white/5 flex flex-col justify-between">
-                      <div className="flex items-center gap-2 mb-2 text-brand-blue">
-                        <Globe size={16} /> <span className="text-xs font-bold uppercase tracking-wider">Network Isolation</span>
+                    <div className="bg-black/30 rounded-xl p-4 border border-white/5 flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-brand-blue">
+                          <Globe size={16} /> <span className="text-xs font-bold uppercase tracking-wider">Network Isolation</span>
+                        </div>
+                        {!isActive && (
+                          <button
+                            onClick={() => setShowProxyInput(p => ({ ...p, [acc.id]: !p[acc.id] }))}
+                            title={showProxyInput[acc.id] ? "Close proxy input" : "Set proxy for this session"}
+                            className="text-white/30 hover:text-brand-cyan transition-colors"
+                          >
+                            {showProxyInput[acc.id] ? <X size={13} /> : <Plus size={13} />}
+                          </button>
+                        )}
                       </div>
                       <div className="text-sm font-mono text-white/80">
-                        {acc.proxy_url ? (
+                        {nodeProxyInputs[acc.id] ? (
+                          <span className="text-yellow-300 text-xs">{nodeProxyInputs[acc.id].replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')} <span className="text-white/30">(session)</span></span>
+                        ) : acc.proxy_url ? (
                           <span className="text-brand-cyan text-xs">{acc.proxy_url.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}</span>
                         ) : (
                           <span className="text-white/40">Direct (No Proxy)</span>
                         )}
                       </div>
-                      <div className="mt-2 flex items-center gap-2">
+                      {showProxyInput[acc.id] && !isActive && (
+                        <div className="flex gap-1.5">
+                          <input
+                            value={nodeProxyInputs[acc.id] || ""}
+                            onChange={(e) => setNodeProxyInputs(p => ({ ...p, [acc.id]: e.target.value }))}
+                            placeholder={acc.proxy_url || "http://user:pass@host:port"}
+                            className="flex-1 px-2 py-1.5 bg-black/50 border border-brand-blue/30 rounded-lg text-[10px] text-white placeholder-white/20 focus:outline-none focus:border-brand-cyan transition-colors"
+                          />
+                          {nodeProxyInputs[acc.id] && (
+                            <button
+                              onClick={() => setNodeProxyInputs(p => ({ ...p, [acc.id]: "" }))}
+                              className="text-white/30 hover:text-brand-pink transition-colors px-1"
+                              title="Clear session proxy"
+                            >
+                              <X size={12} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2">
                         <div className={`w-2 h-2 rounded-full ${isActive ? 'bg-brand-cyan shadow-[0_0_8px_#00f2fe]' : 'bg-white/20'}`} />
                         <span className="text-xs text-white/50">{isActive ? 'Tunnel Active' : 'Disconnected'}</span>
                       </div>
@@ -417,12 +580,19 @@ export default function Dashboard() {
                     </div>
                     {acc.playlists.length > 0 && (
                       <div className="space-y-2 mb-4 max-h-32 overflow-y-auto pr-2 custom-scrollbar">
-                        {acc.playlists.map((p, i) => (
-                          <div key={i} className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-mono border ${i === acc.current_index && isActive ? "bg-brand-cyan/10 border-brand-cyan/30 text-brand-cyan" : "bg-black/30 border-white/5 text-white/60"}`}>
-                            <span className="truncate flex-1"><span className="opacity-50 mr-2">{i + 1}.</span>{p.split("/").pop()?.split("?")[0] || p}</span>
-                            <button onClick={() => removePlaylist(acc.id, i)} className="ml-2 opacity-50 hover:opacity-100 hover:text-brand-pink"><Trash2 size={12} /></button>
-                          </div>
-                        ))}
+                        {acc.playlists.map((p, i) => {
+                          const isCurrent = i === acc.current_index && (isActive || acc.container_running);
+                          return (
+                            <div key={i} className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-mono border transition-colors ${isCurrent ? "bg-brand-cyan/15 border-brand-cyan/50 text-brand-cyan shadow-[0_0_12px_rgba(0,242,254,0.15)]" : "bg-black/30 border-white/5 text-white/60"}`}>
+                              <span className="truncate flex-1 flex items-center gap-2">
+                                {isCurrent && <span className="w-1.5 h-1.5 rounded-full bg-brand-cyan animate-pulse shrink-0" />}
+                                <span className="opacity-50">{i + 1}.</span>
+                                <span className="truncate">{p.split("/").pop()?.split("?")[0] || p}</span>
+                              </span>
+                              <button onClick={() => removePlaylist(acc.id, i)} className="ml-2 opacity-50 hover:opacity-100 hover:text-brand-pink"><Trash2 size={12} /></button>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                     <div className="flex gap-2">
@@ -431,7 +601,7 @@ export default function Dashboard() {
                     </div>
                   </div>
 
-                  {/* Live Terminal */}
+                  {/* Live Terminal — Tabbed: Docker Logs vs Bot Events */}
                   <div className="border-t border-white/5">
                     <button onClick={() => toggleLogs(acc.id)} className="w-full flex items-center justify-between p-3 text-xs font-mono text-white/40 hover:text-white/80 bg-black/40 hover:bg-black/60 transition-colors">
                       <span className="flex items-center gap-2"><Terminal size={12} /> Console Output</span>
@@ -440,10 +610,46 @@ export default function Dashboard() {
                     <AnimatePresence>
                       {expandedLogs[acc.id] && (
                         <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }} exit={{ height: 0 }} className="overflow-hidden bg-[#0a0a0a]">
+                          {/* Tab switcher */}
+                          <div className="flex border-b border-white/10">
+                            <button
+                              onClick={() => setLogTab(p => ({ ...p, [acc.id]: 'docker' }))}
+                              className={`flex-1 px-3 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${(logTab[acc.id] || 'docker') === 'docker' ? 'text-green-400 border-b-2 border-green-400 bg-green-400/5' : 'text-white/30 hover:text-white/50'}`}
+                            >
+                              ▶ Docker Logs
+                            </button>
+                            <button
+                              onClick={() => setLogTab(p => ({ ...p, [acc.id]: 'events' }))}
+                              className={`flex-1 px-3 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${logTab[acc.id] === 'events' ? 'text-brand-cyan border-b-2 border-brand-cyan bg-brand-cyan/5' : 'text-white/30 hover:text-white/50'}`}
+                            >
+                              ◆ Bot Events
+                            </button>
+                          </div>
+
                           <div className="p-4 font-mono text-[10px] md:text-xs leading-relaxed max-h-48 overflow-y-auto custom-scrollbar">
-                            {acc.live_logs && acc.live_logs.length > 0 ? (
-                              acc.live_logs.map((log, i) => <div key={i} className="text-green-400 opacity-80 mb-1 border-b border-white/5 pb-1">{log}</div>)
+                            {(logTab[acc.id] || 'docker') === 'docker' ? (
+                              /* ── Docker container logs (parsed for readability) ── */
+                              acc.live_logs && acc.live_logs.length > 0 ? (
+                                acc.live_logs.map((raw, i) => {
+                                  const parsed = parseDockerLog(raw);
+                                  const isTrack = parsed.msg.includes('Now playing') || parsed.msg.includes('♪');
+                                  const isPlaylist = parsed.msg.includes('Playlist') || parsed.msg.includes('▶');
+                                  const isError = parsed.level === 'ERROR' || parsed.level === 'WARN';
+                                  return (
+                                    <div key={i} className={`mb-1 border-b border-white/5 pb-1 ${
+                                      isTrack ? 'text-emerald-300 font-semibold' :
+                                      isPlaylist ? 'text-green-400' :
+                                      isError ? 'text-amber-400' :
+                                      'text-green-400/60'
+                                    }`}>
+                                      {parsed.time && <span className="text-white/25 mr-2">{parsed.time}</span>}
+                                      {parsed.msg}
+                                    </div>
+                                  );
+                                })
+                              ) : <span className="text-white/30">No Docker logs yet — start a Docker Node to see output...</span>
                             ) : (
+                              /* ── Local bot events (start/stop, status changes) ── */
                               acc.log && (acc.log as Array<any>).length > 0 ? (
                                 (acc.log as Array<any>).map((entry, i) => (
                                   <div key={i} className="text-white/60 mb-1 border-b border-white/5 pb-1">
@@ -451,7 +657,7 @@ export default function Dashboard() {
                                     {typeof entry === 'string' ? entry : entry.msg}
                                   </div>
                                 ))
-                              ) : <span className="text-white/30">Awaiting telemetry...</span>
+                              ) : <span className="text-white/30">No bot events yet...</span>
                             )}
                           </div>
                         </motion.div>
@@ -486,19 +692,43 @@ export default function Dashboard() {
               <div>
                 <p className="text-sm font-bold text-white">Setting up <span className="text-brand-cyan">{setupModal.accountName}</span></p>
                 {setupStatus === "done" ? (
-                  <p className="text-xs text-green-400 mt-0.5">✅ Login detected! Session saved.</p>
+                  <p className="text-xs text-green-400 mt-0.5">Login detected! Session saved.</p>
+                ) : setupStatus === "starting" ? (
+                  <p className="text-xs text-brand-cyan animate-pulse mt-0.5">Starting VNC services... Browser will open shortly.</p>
                 ) : (
-                  <p className="text-xs text-white/40 animate-pulse mt-0.5">⏳ Open the VNC tab and log in to Spotify...</p>
+                  <p className="text-xs text-white/40 animate-pulse mt-0.5">VNC tab opened — log in to Spotify...</p>
                 )}
               </div>
             </div>
             {setupStatus !== "done" && (
-              <button
-                onClick={() => setSetupModal(null)}
-                className="w-full px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 text-white/40 border border-white/10 hover:bg-white/10 transition-all"
-              >
-                Dismiss
-              </button>
+              <div className="flex gap-2">
+                {setupModal?.vncUrl && setupStatus !== "starting" && (
+                  <button
+                    onClick={() => window.open(setupModal.vncUrl, "_blank")}
+                    className="flex-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 hover:bg-brand-cyan/30 transition-all"
+                  >
+                    Open VNC Tab
+                  </button>
+                )}
+                <button
+                  onClick={async () => {
+                    if (busyButtons['dismiss_setup']) return;
+                    setBusyButtons(p => ({ ...p, dismiss_setup: true }));
+                    const accId = setupModal?.accountId;
+                    setSetupModal(null);
+                    setSetupStatus("");
+                    if (accId) {
+                      await api(`/api/v2/stop/${accId}`, { method: "POST" }).catch(() => {});
+                      fetchAccounts();
+                    }
+                    setBusyButtons(p => ({ ...p, dismiss_setup: false }));
+                  }}
+                  disabled={busyButtons['dismiss_setup']}
+                  className="flex-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 text-white/40 border border-white/10 hover:bg-white/10 transition-all disabled:opacity-30"
+                >
+                  {busyButtons['dismiss_setup'] ? 'Stopping...' : 'Dismiss'}
+                </button>
+              </div>
             )}
           </motion.div>
         )}

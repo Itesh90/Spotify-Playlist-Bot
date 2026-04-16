@@ -41,6 +41,47 @@ def _client() -> docker.DockerClient:
     return docker.from_env()
 
 
+# ─── Host Path Resolution ────────────────────────────────────────────────────
+# When running inside Docker (spb_orchestrator), HOST_STORAGE is a container-
+# internal path (e.g. /app/storage/accounts).  But when spawning sibling worker
+# containers via the Docker socket, volume-mount source paths must be HOST
+# filesystem paths (e.g. /root/bot/storage/accounts).  We auto-detect the real
+# host path by inspecting our own container's bind mounts.
+
+_host_volume_path: str | None = None
+
+
+def _resolve_host_volume_path() -> str:
+    """Return the HOST filesystem path that corresponds to HOST_STORAGE."""
+    global _host_volume_path
+    if _host_volume_path is not None:
+        return _host_volume_path
+
+    # 1. Explicit override
+    explicit = os.environ.get("HOST_DATA_PATH")
+    if explicit:
+        _host_volume_path = explicit
+        log.info(f"Using explicit HOST_DATA_PATH: {_host_volume_path}")
+        return _host_volume_path
+
+    # 2. Auto-detect by inspecting our own container's mounts
+    try:
+        client = _client()
+        me = client.containers.get("spb_orchestrator")
+        for mount in me.attrs.get("Mounts", []):
+            if mount.get("Destination") == "/app/storage/accounts":
+                _host_volume_path = mount["Source"]
+                log.info(f"Auto-detected host storage path: {_host_volume_path}")
+                return _host_volume_path
+    except Exception as e:
+        log.warning(f"Could not auto-detect host storage path: {e}")
+
+    # 3. Fallback — assume HOST_STORAGE is already a host path (outside Docker)
+    _host_volume_path = HOST_STORAGE
+    log.info(f"Using HOST_STORAGE as volume path (fallback): {_host_volume_path}")
+    return _host_volume_path
+
+
 def _container_name(account_id: str) -> str:
     return f"spb_worker_{account_id}"
 
@@ -89,29 +130,51 @@ def is_running(account_id: str) -> bool:
         return False
 
 
-def start_worker(account_id: str, proxy_url: str = "") -> str | None:
+def start_worker(account_id: str, proxy_url: str = "", resume_mode: bool = False) -> str | None:
     """
     Spawn an isolated headless worker container for the given account.
     Returns None on success, or an error string on failure.
 
     The container mounts a host directory for persistent session/log storage:
       {HOST_STORAGE}/{account_id}/ → /app/data (inside container)
+
+    When resume_mode=True, the worker reads last_state.json on startup and
+    continues from the last-played playlist and track.
     """
     if is_running(account_id):
         return "Worker is already running"
 
-    host_data_dir = os.path.join(HOST_STORAGE, account_id)
-    os.makedirs(host_data_dir, exist_ok=True)
+    # Create directory inside backend container (for local file reads)
+    os.makedirs(os.path.join(HOST_STORAGE, account_id), exist_ok=True)
+    # Resolve the real HOST path for Docker volume mounts
+    host_data_dir = os.path.join(_resolve_host_volume_path(), account_id)
 
     env = {
         "ACCOUNT_ID": account_id,
         "INTERACTIVE": "0",
+        "RESUME_MODE": "1" if resume_mode else "0",
     }
     if proxy_url:
         env["PROXY_URL"] = proxy_url
 
     try:
         client = _client()
+
+        # Remove any stopped/exited container with the same name
+        try:
+            old = client.containers.get(_container_name(account_id))
+            old.remove(force=True)
+            log.info(f"Removed old container: {_container_name(account_id)}")
+        except (NotFound, APIError):
+            pass
+
+        # Ensure the network exists (create if missing)
+        try:
+            client.networks.get("spb_net")
+        except NotFound:
+            client.networks.create("spb_net", driver="bridge")
+            log.info("Created Docker network: spb_net")
+
         client.containers.run(
             image=WORKER_IMAGE,
             name=_container_name(account_id),
@@ -129,7 +192,8 @@ def start_worker(account_id: str, proxy_url: str = "") -> str | None:
             cap_drop=["ALL"],
             # WireGuard needs NET_ADMIN if VPN is used; safe to add conditionally
             # cap_add=["NET_ADMIN"],
-            mem_limit="512m",
+            mem_limit="1536m",                  # Chrome + Widevine + Spotify SPA needs ~900MB
+            shm_size="512m",                    # Chrome renderer uses /dev/shm — OOMs with default 64MB
             cpu_quota=100_000,                  # 1 CPU core max
         )
         log.info(f"Worker started: {_container_name(account_id)}")
@@ -205,8 +269,10 @@ def setup_login(account_id: str, proxy_url: str = "") -> tuple[str | None, int |
     Returns (error_string, vnc_port) tuple.
     error_string is None on success.
     """
-    host_data_dir = os.path.join(HOST_STORAGE, account_id)
-    os.makedirs(host_data_dir, exist_ok=True)
+    # Create directory inside backend container (for local file reads)
+    os.makedirs(os.path.join(HOST_STORAGE, account_id), exist_ok=True)
+    # Resolve the real HOST path for Docker volume mounts
+    host_data_dir = os.path.join(_resolve_host_volume_path(), account_id)
 
     try:
         client = _client()
@@ -249,8 +315,9 @@ def setup_login(account_id: str, proxy_url: str = "") -> tuple[str | None, int |
                     "mode": "rw",
                 }
             },
-            network_mode="host",                # Bind directly to VM ports (Codespaces DinD fix)
+            ports={f"{vnc_port}/tcp": vnc_port},  # Map VNC port to host
             mem_limit="1g",
+            shm_size="512m",                    # Firefox needs >64MB /dev/shm (tmpfs actual usage counts against mem_limit)
         )
 
         _active_vnc_ports[account_id] = vnc_port
